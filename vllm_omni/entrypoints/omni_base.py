@@ -322,7 +322,26 @@ class OmniBase(PDDisaggregationMixin):
         """
         return not self.engine.is_alive()
 
+    _HEALTH_CHECK_TTL_S: float = 1.0
+
     def check_health(self) -> None:
+        now = time.monotonic()
+        cached = getattr(self, "_health_cache", None)
+        if cached is not None:
+            ts, err = cached
+            if now - ts < self._HEALTH_CHECK_TTL_S:
+                if err is not None:
+                    raise err
+                return
+
+        try:
+            self._check_health_uncached()
+            self._health_cache = (now, None)
+        except EngineDeadError as e:
+            self._health_cache = (now, e)
+            raise
+
+    def _check_health_uncached(self) -> None:
         if not self.engine.is_alive():
             raise EngineDeadError("Orchestrator process is not alive")
         pools = getattr(self.engine, "stage_pools", None)
