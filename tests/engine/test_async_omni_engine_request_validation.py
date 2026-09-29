@@ -8,10 +8,25 @@ from unittest.mock import Mock
 
 import pytest
 from vllm.sampling_params import SamplingParams
+from vllm.v1.engine import EngineCoreRequest
 
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine, StageRuntimeInfo
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+
+def _make_engine_core_request(request_id: str = "req-1") -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[1],
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
 
 
 def _make_engine(num_stages: int = 3) -> AsyncOmniEngine:
@@ -58,13 +73,7 @@ class TestFinalStageIdValidation:
 
     def test_valid_final_stage_id_zero_passes(self):
         engine = _make_engine(num_stages=2)
-        engine.input_processor.process_inputs.return_value = Mock(
-            request_id="req-1",
-            prompt_token_ids=[1],
-            additional_information=None,
-            model_intermediate_buffer=None,
-            reasoning_ended=None,
-        )
+        engine.input_processor.process_inputs.return_value = _make_engine_core_request()
         engine.supported_tasks = ("generate",)
         engine.prompt_transform_func = None
         engine.prompt_expand_func = None
@@ -89,13 +98,7 @@ class TestSamplingParamsListLengthValidation:
 
     def test_sampling_params_list_exact_length_passes(self):
         engine = _make_engine(num_stages=3)
-        engine.input_processor.process_inputs.return_value = Mock(
-            request_id="req-1",
-            prompt_token_ids=[1],
-            additional_information=None,
-            model_intermediate_buffer=None,
-            reasoning_ended=None,
-        )
+        engine.input_processor.process_inputs.return_value = _make_engine_core_request()
         engine.supported_tasks = ("generate",)
         engine.prompt_transform_func = None
         engine.prompt_expand_func = None
