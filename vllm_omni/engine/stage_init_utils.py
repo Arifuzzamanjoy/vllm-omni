@@ -399,12 +399,8 @@ def _apply_rocm_attention_backend(
 
     if rocm_aiter_ops.is_enabled():
         engine_args["attention_backend"] = "ROCM_AITER_FA"
-    # Before vLLM v0.19.0, the default attention backend is TRITON_ATTN for ROCm.
-    # Since vLLM v0.19.0, the default attention backend is ROCM_ATTN for ROCm.
-    # However, the compatibility of ROCM_ATTN with Omni is not guaranteed.
-    # Therefore, we still use TRITON_ATTN as the default attention backend,
-    # when the selected_backend is not specified.
-    engine_args["attention_backend"] = "TRITON_ATTN"
+    else:
+        engine_args["attention_backend"] = "TRITON_ATTN"
 
 
 def extract_legacy_stage_metadata(stage_config: Any) -> StageMetadata:
