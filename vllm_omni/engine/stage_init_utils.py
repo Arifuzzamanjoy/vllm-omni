@@ -1847,6 +1847,7 @@ def acquire_device_locks(
                         record_lock_holder_pid(lock_fd, lock_writable)
                         lock_acquired = True
                         lock_fds.append(lock_fd)
+                        lock_fd = None
                         if locked_devices is not None:
                             locked_devices.add(device_id)
                         logger.debug("Acquired exclusive lock for device %s", device_id)
