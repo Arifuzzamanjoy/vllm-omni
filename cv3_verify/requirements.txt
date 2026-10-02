@@ -1,0 +1,7 @@
+# Installed on top of the vllm==0.30.0 + vllm-omni venv; none of these may
+# replace torch/vllm. torch, torchaudio and transformers come from that venv.
+datasets>=3.0          # LibriTTS-R streaming (prepare_voices.py only)
+onnxruntime>=1.17      # CAM++ campplus.onnx speaker scorer
+soundfile>=0.12
+scipy>=1.10            # resampling
+httpx>=0.27

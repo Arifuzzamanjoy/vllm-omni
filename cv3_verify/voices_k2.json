@@ -1,0 +1,30 @@
+{
+  "voices": [
+    {
+      "name": "k2_zero_shot",
+      "wav": "voices/k2/zero_shot_prompt.wav",
+      "ref_text": "希望你以后能够做的比我还好呦。",
+      "gender": "F",
+      "source": "FunAudioLLM/CosyVoice asset/zero_shot_prompt.wav",
+      "origin": "tests/assets/cosyvoice3/zero_shot_prompt.wav (repo copy of https://raw.githubusercontent.com/FunAudioLLM/CosyVoice/main/asset/zero_shot_prompt.wav)",
+      "license": "Apache-2.0",
+      "sample_rate": 24000,
+      "duration_s": 3.48,
+      "heldout_wav": null,
+      "heldout_text": null
+    },
+    {
+      "name": "k2_cross_lingual",
+      "wav": "voices/k2/cross_lingual_prompt.wav",
+      "ref_text": "在那之后，完全收购那家公司，因此保持管理层的一致性，利益与即将加入家族的资产保持一致。这就是我们有时不买下全部的原因。",
+      "gender": "M",
+      "source": "FunAudioLLM/CosyVoice asset/cross_lingual_prompt.wav",
+      "origin": "https://raw.githubusercontent.com/FunAudioLLM/CosyVoice/main/asset/cross_lingual_prompt.wav",
+      "license": "Apache-2.0",
+      "sample_rate": 22050,
+      "duration_s": 13.75,
+      "heldout_wav": null,
+      "heldout_text": null
+    }
+  ]
+}
