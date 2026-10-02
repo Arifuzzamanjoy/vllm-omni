@@ -31,6 +31,10 @@ PORT="${PORT:-8091}"
 N="${N:-120}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-1200}"
 export HF_HOME="${HF_HOME:-/home/ubuntu/hf_home}"
+# FlashInfer's top-k/top-p sampler JIT-compiles with nvcc, which this VM lacks.
+# The PyTorch sampler is used for every commit instead; neither bug under test
+# (conditioning routing, embed_input_ids batch order) goes through the sampler.
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 
 C_CTRL=c85f1a4
 C_FIX=1ea0ee3
@@ -90,6 +94,7 @@ print("vllm.__version__", vllm.__version__)
 print("vllm_omni.__file__", vllm_omni.__file__)
 print("torch", torch.__version__, "cuda", torch.version.cuda, torch.cuda.get_device_name(0))
 print("python", sys.version.split()[0])
+print("VLLM_USE_FLASHINFER_SAMPLER", os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"))
 ok = os.path.realpath(vllm_omni.__file__).startswith(wt + os.sep)
 print("vllm_omni_from_worktree", ok)
 sys.exit(0 if ok else 3)
@@ -141,7 +146,7 @@ start_server() {
   (cd "$wt" && HF_HUB_OFFLINE=1 setsid "$VLLM" serve "$MODEL" --omni --trust-remote-code --port "$PORT" \
       --deploy-config "$deploy" "${extra[@]}" > "$logf" 2>&1 & echo $! > "$logf.pid")
   SERVER_PID="$(cat "$logf.pid")"
-  log "server pid $SERVER_PID: vllm serve $MODEL --omni --trust-remote-code --port $PORT --deploy-config $deploy ${extra[*]}"
+  log "server pid $SERVER_PID (VLLM_USE_FLASHINFER_SAMPLER=$VLLM_USE_FLASHINFER_SAMPLER): vllm serve $MODEL --omni --trust-remote-code --port $PORT --deploy-config $deploy ${extra[*]}"
   local t0=$SECONDS
   while (( SECONDS - t0 < STARTUP_TIMEOUT )); do
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then log "server exited during startup"; return 1; fi
