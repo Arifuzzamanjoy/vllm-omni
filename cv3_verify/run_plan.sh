@@ -143,8 +143,15 @@ start_server() {
     log "port $PORT already in use; refusing to start"
     return 1
   fi
-  (cd "$wt" && HF_HUB_OFFLINE=1 setsid "$VLLM" serve "$MODEL" --omni --trust-remote-code --port "$PORT" \
-      --deploy-config "$deploy" "${extra[@]}" > "$logf" 2>&1 & echo $! > "$logf.pid")
+  # setsid forks when its caller leads a process group, so $! would be a
+  # short-lived wrapper. The child shell writes its own PID and execs the
+  # server, so SERVER_PID is the leader of the server's own process group.
+  rm -f "$logf.pid"
+  # shellcheck disable=SC2016  # $$ and $@ must expand in the child shell
+  (cd "$wt" && HF_HUB_OFFLINE=1 setsid sh -c 'echo $$ > "$0"; exec "$@"' "$logf.pid" \
+      "$VLLM" serve "$MODEL" --omni --trust-remote-code --port "$PORT" \
+      --deploy-config "$deploy" "${extra[@]}" > "$logf" 2>&1 &)
+  for _ in $(seq 50); do [[ -s "$logf.pid" ]] && break; sleep 0.1; done
   SERVER_PID="$(cat "$logf.pid")"
   log "server pid $SERVER_PID (VLLM_USE_FLASHINFER_SAMPLER=$VLLM_USE_FLASHINFER_SAMPLER): vllm serve $MODEL --omni --trust-remote-code --port $PORT --deploy-config $deploy ${extra[*]}"
   local t0=$SECONDS
@@ -169,6 +176,10 @@ stop_server() {
     (( used < 2000 )) && ! ss -ltn | grep -q ":$PORT " && break
     sleep 1
   done
+  if kill -0 "$SERVER_PID" 2>/dev/null || ss -ltn | grep -q ":$PORT "; then
+    log "server $SERVER_PID did not stop (GPU used ${used:-?} MiB); aborting"
+    exit 7
+  fi
   log "server $SERVER_PID stopped (GPU used ${used:-?} MiB)"
   SERVER_PID=""
 }
