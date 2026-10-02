@@ -1,0 +1,16 @@
+# commit hashes
+c85f1a4 c85f1a44fb1345af8c903ecb75260ca10a5e3094  2026-09-29 [Bugfix] Break duplex OpenAI import cycle (#8287)
+1ea0ee3 1ea0ee3b38945d43fb9e662f0d32f0be97717189  2026-09-29 [Model] Add opt-in packed Flow and batched HiFT inference for CosyVoice3 (#8224)
+bbee488 bbee488da3baf65817f4f8826b1f6e89cc28fda7  2026-10-01 fix: repair ROCm test routing, CPU timeouts, and Breeze autotuning (#8342)
+
+# kit
+branch repro/cosyvoice3-voice-leak-8235 (fork Arifuzzamanjoy/vllm-omni) head f71f13c6d5d783e281fee097dc9ce0a3d3c5810f
+f71f13c6 [Misc] Stop the whole server process group in the CosyVoice3 leak plan
+5526480c [Misc] Run CosyVoice3 leak plan with the PyTorch top-k/top-p sampler
+fc2a0e2e [Misc] Add CosyVoice3 voice-leak verification kit
+base b0510a0b7c2e873daf81fbef8709fe8d5c2f7a2d (b0510a0 on top of upstream bbee488)
+
+# worktree heads at run time
+c85f1a4 worktree_head c85f1a44fb1345af8c903ecb75260ca10a5e3094
+1ea0ee3 worktree_head 1ea0ee3b38945d43fb9e662f0d32f0be97717189
+bbee488 worktree_head bbee488da3baf65817f4f8826b1f6e89cc28fda7

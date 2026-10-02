@@ -1,0 +1,66 @@
+# versions
+## c85f1a4
+/home/ubuntu/cv3_wt/c85f1a4/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev3350+gc85f1a44f
+ --> vLLM version 0.30.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+worktree /home/ubuntu/cv3_wt/c85f1a4
+worktree_head c85f1a44fb1345af8c903ecb75260ca10a5e3094
+vllm.__version__ 0.30.0
+vllm_omni.__file__ /home/ubuntu/cv3_wt/c85f1a4/vllm_omni/__init__.py
+torch 2.13.0+cu130 cuda 13.0 NVIDIA GeForce RTX 4090
+python 3.12.15
+VLLM_USE_FLASHINFER_SAMPLER 0
+vllm_omni_from_worktree True
+## 1ea0ee3
+/home/ubuntu/cv3_wt/1ea0ee3/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev3351+g1ea0ee3b3
+ --> vLLM version 0.30.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+worktree /home/ubuntu/cv3_wt/1ea0ee3
+worktree_head 1ea0ee3b38945d43fb9e662f0d32f0be97717189
+vllm.__version__ 0.30.0
+vllm_omni.__file__ /home/ubuntu/cv3_wt/1ea0ee3/vllm_omni/__init__.py
+torch 2.13.0+cu130 cuda 13.0 NVIDIA GeForce RTX 4090
+python 3.12.15
+VLLM_USE_FLASHINFER_SAMPLER 0
+vllm_omni_from_worktree True
+## bbee488
+/home/ubuntu/cv3_wt/bbee488/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev3377+gbbee488da
+ --> vLLM version 0.30.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+worktree /home/ubuntu/cv3_wt/bbee488
+worktree_head bbee488da3baf65817f4f8826b1f6e89cc28fda7
+vllm.__version__ 0.30.0
+vllm_omni.__file__ /home/ubuntu/cv3_wt/bbee488/vllm_omni/__init__.py
+torch 2.13.0+cu130 cuda 13.0 NVIDIA GeForce RTX 4090
+python 3.12.15
+VLLM_USE_FLASHINFER_SAMPLER 0
+vllm_omni_from_worktree True
+
+name, memory.total [MiB], driver_version
+NVIDIA GeForce RTX 4090, 24564 MiB, 580.95.05
+CUDA driver API: CUDA Version: 13.0
+Linux 6.8.0-59-generic
+Ubuntu 22.04.5 LTS
+
+model FunAudioLLM/Fun-CosyVoice3-0.5B-2512 snapshot 29e01c4e8d000f4bcd70751be16fa94bf3d85a18
+scorer microsoft/wavlm-base-plus-sv: config/preprocessor from main feb593a6c23c1cc3d9510425c29b0a14d2b07b1e (pytorch_model.bin); transformers 5 additionally fetched model.safetensors from the hub safetensors-conversion PR ref 1bfd64eca136543feb28c5ffaf05381c6af33121 at the first scoring step (16:18 UTC) and used it for all run scoring. The pre-run reference matrix (15:30 UTC, cv3_logs/refmatrix.json) used the .bin.
+asr openai/whisper-small snapshot 973afd24965f72e36ca33b3055d56a652f456b4d
+campplus.onnx sha256 a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73
+
+vllm 0.30.0
+torch 2.13.0
+torchaudio 2.11.0
+transformers 5.14.1
+flashinfer-python 0.6.18.post1
+onnxruntime 1.30.0
+datasets 5.0.1
+numpy 2.3.5
+scipy 1.18.1
+soundfile 0.14.0
+httpx 0.28.1

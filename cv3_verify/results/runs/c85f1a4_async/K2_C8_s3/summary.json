@@ -1,0 +1,120 @@
+{
+ "n_scored": 120,
+ "campplus_wrong": {
+  "k": 9,
+  "n": 120,
+  "rate": 0.075,
+  "wilson95": [
+   0.04,
+   0.1364
+  ]
+ },
+ "wavlm_wrong": {
+  "k": 10,
+  "n": 120,
+  "rate": 0.0833,
+  "wilson95": [
+   0.0459,
+   0.1466
+  ]
+ },
+ "wrong_both_agree": {
+  "k": 9,
+  "n": 120,
+  "rate": 0.075,
+  "wilson95": [
+   0.04,
+   0.1364
+  ]
+ },
+ "wrong_any": {
+  "k": 10,
+  "n": 120,
+  "rate": 0.0833,
+  "wilson95": [
+   0.0459,
+   0.1466
+  ]
+ },
+ "confusion_campplus": {
+  "k2_zero_shot": {
+   "k2_zero_shot": 55,
+   "k2_cross_lingual": 5
+  },
+  "k2_cross_lingual": {
+   "k2_zero_shot": 4,
+   "k2_cross_lingual": 56
+  }
+ },
+ "confusion_wavlm": {
+  "k2_zero_shot": {
+   "k2_zero_shot": 55,
+   "k2_cross_lingual": 5
+  },
+  "k2_cross_lingual": {
+   "k2_zero_shot": 5,
+   "k2_cross_lingual": 55
+  }
+ },
+ "wer_mean": 0.0155,
+ "wer_gt_0.2": 2,
+ "dur_ratio_gt_1.3": 5,
+ "min_margin": {
+  "campplus": -0.7868,
+  "wavlm": -0.631
+ },
+ "meta": {
+  "label": "c85f1a4_async",
+  "commit": "c85f1a4",
+  "mode": "async",
+  "overlay": "",
+  "K": 2,
+  "C": 8,
+  "seed": 3,
+  "N": 120
+ },
+ "n_requests": 120,
+ "n_errors": 0,
+ "error_examples": [],
+ "scorer_versions": {
+  "wavlm_model": "microsoft/wavlm-base-plus-sv",
+  "asr_model": "openai/whisper-small",
+  "campplus": "/home/ubuntu/hf_home/hub/models--FunAudioLLM--Fun-CosyVoice3-0.5B-2512/snapshots/29e01c4e8d000f4bcd70751be16fa94bf3d85a18/campplus.onnx"
+ },
+ "reference_matrix": {
+  "campplus": {
+   "names": [
+    "k2_zero_shot",
+    "k2_cross_lingual"
+   ],
+   "ref_vs_ref": [
+    [
+     1.0,
+     0.09969999641180038
+    ],
+    [
+     0.09969999641180038,
+     1.0
+    ]
+   ],
+   "max_offdiag_ref": 0.0997
+  },
+  "wavlm": {
+   "names": [
+    "k2_zero_shot",
+    "k2_cross_lingual"
+   ],
+   "ref_vs_ref": [
+    [
+     1.0,
+     0.3749000132083893
+    ],
+    [
+     0.3749000132083893,
+     1.0
+    ]
+   ],
+   "max_offdiag_ref": 0.3749
+  }
+ }
+}

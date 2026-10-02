@@ -1,0 +1,41 @@
+Measured this on three commits: c85f1a4 (before #8224), 1ea0ee3 (#8224) and bbee488.
+
+Both scorers agree, wrong voice / requests, async_chunk mode:
+
+  commit    K  C   wrong     rate    95% CI
+  c85f1a4   2  1     0/120   0.0%   [0.000, 0.031]
+  c85f1a4   2  8    42/360  11.7%   [0.087, 0.154]
+  c85f1a4   8  1     0/120   0.0%   [0.000, 0.031]
+  c85f1a4   8  8    90/360  25.0%   [0.208, 0.297]
+  1ea0ee3   2  8     0/360   0.0%   [0.000, 0.011]
+  bbee488   2  8     0/360   0.0%   [0.000, 0.011]
+  bbee488   8  8     0/360   0.0%   [0.000, 0.011]
+  bbee488   8  8     0/360   0.0%   (talker max_num_seqs=4)
+
+So the leak reproduces before #8224 (Fisher p 3e-6 and 2e-13 against C=1) and is gone
+from 1ea0ee3 on. Text stays correct in the leaked outputs (mean WER < 0.01), only the
+speaker changes. Every leaked voice belonged to a request that was in flight at the
+same time. With 8 voices, the leaked voice was that of the request sent just before or
+after in 70 of 90 cases (about 26 expected by chance) and that of the earliest
+in-flight request in 13 (about 11 expected). That is from client timestamps only, but
+it points at conditioning landing one batch row off rather than always falling back
+to row 0.
+
+--no-async-chunk could not be measured: it fails on the first request at all three
+commits (see the note on #8262).
+
+Setup: 1x RTX 4090 24 GB, driver 580.95.05, Ubuntu 22.04, Python 3.12, vllm 0.30.0, torch 2.13.0+cu130,
+Fun-CosyVoice3-0.5B-2512, stock deploy/cosyvoice3.yaml (talker max_num_seqs 8, FLASH_ATTN),
+vllm-omni installed editable from a worktree of each commit.
+
+Method: voices registered with POST /v1/audio/voices, 120 seeded /v1/audio/speech requests
+per run, round-robin over K voices, four English texts of different lengths. Every output
+is scored against all K references with two independent speaker models (CAM++ campplus.onnx
+from the model, and WavLM-base-plus-SV); a leak counts only when both name the same wrong
+voice. Whisper-small WER and duration ratio for corrupted output.
+
+Kit: https://github.com/Arifuzzamanjoy/vllm-omni/tree/repro/cosyvoice3-voice-leak-8235
+
+Caveats: the FlashInfer sampler could not JIT on this machine (no nvcc), so all servers ran
+with VLLM_USE_FLASHINFER_SAMPLER=0 (PyTorch top-k/top-p), same for every commit; neither bug
+path goes through the sampler. One seed at C=1 per cell. Single GPU class.

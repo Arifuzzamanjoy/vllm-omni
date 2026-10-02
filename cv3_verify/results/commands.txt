@@ -1,0 +1,54 @@
+# Commands run for this measurement (in order). Results in brackets.
+# Host: Ubuntu 22.04.5, kernel 6.8.0-59, 1x RTX 4090 24 GB, driver 580.95.05.
+
+## Step 0
+apt-mark hold <18 installed nvidia-*/libnvidia-* packages>            [held; no cuda-drivers package installed]
+apt-mark showhold                                                       [18 packages listed]
+
+## Step 1: environment (repo /home/ubuntu/vllm-omni)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install vllm==0.30.0
+uv pip install -e .
+python -c "import torch, vllm, vllm_omni; ..."                          [torch 2.13.0+cu130, cuda True, RTX 4090, vllm 0.30.0]
+uv pip install -r cv3_verify/requirements.txt                            [datasets 5.0.1 added; torch/vllm unchanged]
+HF_HOME=/home/ubuntu/hf_home python -c "snapshot_download('FunAudioLLM/Fun-CosyVoice3-0.5B-2512')"   [once; snapshot 29e01c4e]
+HF_HOME=/home/ubuntu/hf_home python -c "snapshot_download('microsoft/wavlm-base-plus-sv'); snapshot_download('openai/whisper-small')"
+
+## Kit preparation and offline tests
+python cv3_verify/prepare_voices.py --write-manifests                   [K=2 + K=8 voices, 24 kHz]
+python cv3_verify/measure_voice_leak.py refmatrix --voices cv3_verify/voices_k2.json cv3_verify/voices_k8.json --model-dir <snapshot>
+python -m py_compile cv3_verify/*.py                                     [ok]
+uvx --from shellcheck-py shellcheck cv3_verify/run_plan.sh               [0 findings]
+cv3_verify/run_plan.sh --dry-run                                         [44 runs, exit 0]
+python cv3_verify/mock_server.py --voices cv3_verify/voices_k8.json --port 18091 --swap 5:k8_f237 --swap 17:k8_m8230
+python cv3_verify/measure_voice_leak.py run --base http://127.0.0.1:18091 --voices cv3_verify/voices_k8.json --n 24 -c 8 ...
+python cv3_verify/measure_voice_leak.py score <mock run dirs> --model-dir <snapshot>   [idx 5 and 17 flagged by both scorers; 22 others correct]
+
+## Step 2: positive control
+tmux new-session -d -s cv3control "bash cv3_verify/run_plan.sh --phase control | tee /home/ubuntu/cv3_out/plan_control.log"
+   attempt 1: c85f1a4 async startup failed: FlashInfer sampler JIT needs nvcc (superseded/)
+   VLLM_USE_FLASHINFER_SAMPLER=0 added to run_plan.sh (kit commit 5526480)
+   attempt 2: c85f1a4 async 8 runs ok; c85f1a4 no-async smoke HTTP 500 (findings/)
+   kit commit f71f13c: stop the server's whole process group (two servers had to be stopped by hand)
+
+## Step 3: remaining runs
+tmux new-session -d -s cv3rest "VLLM_USE_FLASHINFER_SAMPLER=0 bash cv3_verify/run_plan.sh --phase rest | tee /home/ubuntu/cv3_out/plan_rest.log"
+
+## Per server, as executed by run_plan.sh (cwd = worktree of the commit)
+git worktree add --detach /home/ubuntu/cv3_wt/<commit> <commit>
+uv pip install --python .venv/bin/python --no-deps -e /home/ubuntu/cv3_wt/<commit>
+HF_HUB_OFFLINE=1 VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve FunAudioLLM/Fun-CosyVoice3-0.5B-2512 --omni --trust-remote-code \
+    --port 8091 --deploy-config vllm_omni/deploy/cosyvoice3.yaml [--no-async-chunk]
+    (overlays: --deploy-config /home/ubuntu/cv3_out/overlays/bbee488_{mns4,prefix}.yaml, base_config = the worktree's cosyvoice3.yaml)
+python cv3_verify/measure_voice_leak.py run --voices cv3_verify/voices_k2.json --n 1 -c 1 --seed 999 ... --out <server>/smoke
+python cv3_verify/measure_voice_leak.py run --voices cv3_verify/voices_k{K}.json --n 120 -c {C} --seed {S} ... --out <server>/K{K}_C{C}_s{S}
+python cv3_verify/measure_voice_leak.py score <run dirs> --model-dir <snapshot>      (after the server stops)
+python cv3_verify/measure_voice_leak.py gate --runs-root /home/ubuntu/cv3_out/runs --commit c85f1a4 ...   [control only: 137/135 wrong, pass]
+python cv3_verify/measure_voice_leak.py report --runs-root /home/ubuntu/cv3_out/runs --out-dir /home/ubuntu/cv3_out/report
+
+## Step 4: analysis and packaging
+python evidence/scripts/analyze.py /home/ubuntu/cv3_out /home/ubuntu/evidence     -> analysis.txt, cells_combined.csv, server_status.csv
+tar -czf /home/ubuntu/evidence.tgz -C /home/ubuntu evidence
+tar -czf /home/ubuntu/cv3-backup.tgz -C /home/ubuntu evidence cv3_out
+sha256sum /home/ubuntu/evidence.tgz /home/ubuntu/cv3-backup.tgz

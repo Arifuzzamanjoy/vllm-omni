@@ -1,0 +1,4 @@
+base_config: /home/ubuntu/cv3_wt/bbee488/vllm_omni/deploy/cosyvoice3.yaml
+stages:
+  - stage_id: 0
+    enable_prefix_caching: true

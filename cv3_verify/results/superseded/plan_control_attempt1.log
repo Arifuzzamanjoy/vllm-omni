@@ -1,0 +1,24 @@
+[2026-10-02T15:33:18Z] model dir /home/ubuntu/hf_home/hub/models--FunAudioLLM--Fun-CosyVoice3-0.5B-2512/snapshots/29e01c4e8d000f4bcd70751be16fa94bf3d85a18; out /home/ubuntu/cv3_out; phase control
+[2026-10-02T15:33:18Z] === server c85f1a4_async ===
+Preparing worktree (detached HEAD c85f1a44)
+HEAD is now at c85f1a44 [Bugfix] Break duplex OpenAI import cycle (#8287)
+/home/ubuntu/cv3_wt/c85f1a4/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev3350+gc85f1a44f
+ --> vLLM version 0.30.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+INFO 10-02 15:33:56 [patch.py:253] NVFP4 W4A4 weight_scale NaN-clamp: skipped — upstream serves ModelOpt linears through the generic ModelOptLinearMethod and rejects any NaN weight_scale (unloaded-scale sentinel), so a load-time error replaces the `!!!!` decode-time collapse.
+INFO 10-02 15:33:57 [patch.py:565] inductor factorable-divisibility patch: installed.
+INFO 10-02 15:33:57 [patch.py:630] [cumem-cuda] CuMemAllocator._python_free_callback patched: asleep guard extended to all platforms.
+worktree /home/ubuntu/cv3_wt/c85f1a4
+worktree_head c85f1a44fb1345af8c903ecb75260ca10a5e3094
+vllm.__version__ 0.30.0
+vllm_omni.__file__ /home/ubuntu/cv3_wt/c85f1a4/vllm_omni/__init__.py
+torch 2.13.0+cu130 cuda 13.0 NVIDIA GeForce RTX 4090
+python 3.12.15
+vllm_omni_from_worktree True
+[2026-10-02T15:34:03Z] server pid 17031: vllm serve FunAudioLLM/Fun-CosyVoice3-0.5B-2512 --omni --trust-remote-code --port 8091 --deploy-config vllm_omni/deploy/cosyvoice3.yaml 
+[2026-10-02T15:39:09Z] server exited during startup
+[2026-10-02T15:39:09Z] failure recorded: /home/ubuntu/cv3_out/findings/c85f1a4_async_startup.txt
+[2026-10-02T15:39:11Z] server 17031 stopped (GPU used 0 MiB)
+[2026-10-02T15:39:11Z] === server c85f1a4_no-async ===

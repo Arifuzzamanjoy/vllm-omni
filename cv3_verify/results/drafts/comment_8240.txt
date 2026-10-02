@@ -1,0 +1,35 @@
+Data point for this PR (I did not build or run this branch).
+
+On main, #8224 (1ea0ee3) already pads the per-request prompt conditioning to the batch
+rows (_align_prompt_conditioning in cosyvoice3.py), and in my measurement that is enough
+to remove the voice mixing from #8235:
+
+  commit    K  C   both scorers wrong
+  c85f1a4   2  8   42/360  (11.7%)
+  c85f1a4   8  8   90/360  (25.0%)
+  1ea0ee3   2  8    0/360
+  bbee488   2  8    0/360
+  bbee488   8  8    0/360
+
+The element[0] fallback in utils/mm_outputs.py (to_payload_element) is still there on
+bbee488, so the change here may still be useful as a guard for other models, but for
+CosyVoice3 on current main it looks redundant with #8224 and would need a rebase onto
+that code. Also from client timing: before #8224 the leaked voice was usually the
+neighbouring request's (70 of 90 vs about 26 by chance), not the earliest in-flight one
+(13 vs about 11), which fits a one-row shift better than a pure fallback to row 0.
+
+Setup: 1x RTX 4090 24 GB, driver 580.95.05, Ubuntu 22.04, Python 3.12, vllm 0.30.0, torch 2.13.0+cu130,
+Fun-CosyVoice3-0.5B-2512, stock deploy/cosyvoice3.yaml (talker max_num_seqs 8, FLASH_ATTN),
+vllm-omni installed editable from a worktree of each commit.
+
+Method: voices registered with POST /v1/audio/voices, 120 seeded /v1/audio/speech requests
+per run, round-robin over K voices, four English texts of different lengths. Every output
+is scored against all K references with two independent speaker models (CAM++ campplus.onnx
+from the model, and WavLM-base-plus-SV); a leak counts only when both name the same wrong
+voice. Whisper-small WER and duration ratio for corrupted output.
+
+Kit: https://github.com/Arifuzzamanjoy/vllm-omni/tree/repro/cosyvoice3-voice-leak-8235
+
+Caveats: the FlashInfer sampler could not JIT on this machine (no nvcc), so all servers ran
+with VLLM_USE_FLASHINFER_SAMPLER=0 (PyTorch top-k/top-p), same for every commit; neither bug
+path goes through the sampler. One seed at C=1 per cell. Single GPU class.

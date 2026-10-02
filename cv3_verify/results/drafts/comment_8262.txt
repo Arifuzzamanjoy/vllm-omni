@@ -1,0 +1,38 @@
+Data point for the --no-async-chunk path (I did not build or run this branch).
+
+With --no-async-chunk the server starts and passes /health, then the first speech request
+returns HTTP 500 after about 1.3 s and stage 1 dies. Same on c85f1a4, 1ea0ee3 (#8224) and
+bbee488:
+
+  RuntimeError: Error concatenating tensor list for key 'embed.speech_feat' under strategy
+  TensorAccumulationStrategy.CONCAT_DIM0: Sizes of tensors must match except in dimension 0.
+  Expected size 174 but got size 1500 for tensor number 1 in the list.
+  ...
+  msgspec.ValidationError: cannot decode list into torch.Tensor - at $.embed.speech_token_len
+  EngineDeadError ... error_stage_id=1
+
+Request: one non-streaming /v1/audio/speech with a voice registered through
+/v1/audio/voices (official zero_shot_prompt.wav and its transcript). The tracebacks are in
+the output accumulator (mm_outputs._consolidate_tensor_list) and in stage-1 msgspec
+decoding; I have not checked whether accepting Mapping payloads alone is enough, so it
+would be worth running this branch against that request. The async_chunk path works on
+all three commits.
+
+Command: vllm serve FunAudioLLM/Fun-CosyVoice3-0.5B-2512 --omni --trust-remote-code
+--port 8091 --deploy-config vllm_omni/deploy/cosyvoice3.yaml --no-async-chunk
+
+Setup: 1x RTX 4090 24 GB, driver 580.95.05, Ubuntu 22.04, Python 3.12, vllm 0.30.0, torch 2.13.0+cu130,
+Fun-CosyVoice3-0.5B-2512, stock deploy/cosyvoice3.yaml (talker max_num_seqs 8, FLASH_ATTN),
+vllm-omni installed editable from a worktree of each commit.
+
+Method: voices registered with POST /v1/audio/voices, 120 seeded /v1/audio/speech requests
+per run, round-robin over K voices, four English texts of different lengths. Every output
+is scored against all K references with two independent speaker models (CAM++ campplus.onnx
+from the model, and WavLM-base-plus-SV); a leak counts only when both name the same wrong
+voice. Whisper-small WER and duration ratio for corrupted output.
+
+Kit: https://github.com/Arifuzzamanjoy/vllm-omni/tree/repro/cosyvoice3-voice-leak-8235
+
+Caveats: the FlashInfer sampler could not JIT on this machine (no nvcc), so all servers ran
+with VLLM_USE_FLASHINFER_SAMPLER=0 (PyTorch top-k/top-p), same for every commit; neither bug
+path goes through the sampler. One seed at C=1 per cell. Single GPU class.

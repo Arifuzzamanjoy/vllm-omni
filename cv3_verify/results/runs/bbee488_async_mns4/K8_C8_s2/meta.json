@@ -1,0 +1,46 @@
+{
+ "label": "bbee488_async_mns4",
+ "commit": "bbee488",
+ "mode": "async",
+ "overlay": "mns4",
+ "K": 8,
+ "C": 8,
+ "seed": 2,
+ "N": 120,
+ "voices_file": "/home/ubuntu/vllm-omni/cv3_verify/voices_k8.json",
+ "voices": [
+  "k8_f237",
+  "k8_f2961",
+  "k8_f5142",
+  "k8_f6829",
+  "k8_m1188",
+  "k8_m7127",
+  "k8_m8224",
+  "k8_m8230"
+ ],
+ "base": "http://127.0.0.1:8091",
+ "model": "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+ "kit_commit": "f71f13c6d5d783e281fee097dc9ce0a3d3c5810f",
+ "texts": [
+  "Thank you so much for the birthday gift you sent me last week.",
+  "The weather is lovely today, with warm sunshine and a gentle breeze, so we decided to walk in the park.",
+  "Please remember to bring your notebook and a pen to the meeting tomorrow morning.",
+  "After the long winter, the farmers were glad to see the first green shoots appear in the fields, and the children ran outside to play until the sun went down behind the hills."
+ ],
+ "request_seed_rule": "seed*1000 + idx",
+ "started_utc": "2026-10-02T18:37:18+00:00",
+ "registration": {
+  "k8_f237": "already-registered",
+  "k8_f2961": "already-registered",
+  "k8_f5142": "already-registered",
+  "k8_f6829": "already-registered",
+  "k8_m1188": "already-registered",
+  "k8_m7127": "already-registered",
+  "k8_m8224": "already-registered",
+  "k8_m8230": "already-registered"
+ },
+ "wall_s": 197.641,
+ "n_ok": 120,
+ "n_err": 0,
+ "finished_utc": "2026-10-02T18:40:37+00:00"
+}

@@ -1,0 +1,34 @@
+{
+ "label": "c85f1a4_async",
+ "commit": "c85f1a4",
+ "mode": "async",
+ "overlay": "",
+ "K": 2,
+ "C": 8,
+ "seed": 1,
+ "N": 120,
+ "voices_file": "/home/ubuntu/vllm-omni/cv3_verify/voices_k2.json",
+ "voices": [
+  "k2_zero_shot",
+  "k2_cross_lingual"
+ ],
+ "base": "http://127.0.0.1:8091",
+ "model": "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+ "kit_commit": "5526480cff451479fc144c0b87dea94c423fb4a6",
+ "texts": [
+  "Thank you so much for the birthday gift you sent me last week.",
+  "The weather is lovely today, with warm sunshine and a gentle breeze, so we decided to walk in the park.",
+  "Please remember to bring your notebook and a pen to the meeting tomorrow morning.",
+  "After the long winter, the farmers were glad to see the first green shoots appear in the fields, and the children ran outside to play until the sun went down behind the hills."
+ ],
+ "request_seed_rule": "seed*1000 + idx",
+ "started_utc": "2026-10-02T15:51:09+00:00",
+ "registration": {
+  "k2_zero_shot": "already-registered",
+  "k2_cross_lingual": "already-registered"
+ },
+ "wall_s": 180.876,
+ "n_ok": 120,
+ "n_err": 0,
+ "finished_utc": "2026-10-02T15:54:10+00:00"
+}

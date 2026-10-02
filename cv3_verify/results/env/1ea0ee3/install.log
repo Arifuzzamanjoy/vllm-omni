@@ -1,0 +1,7 @@
+Resolved 1 package in 2.71s
+   Building vllm-omni @ file:///home/ubuntu/cv3_wt/1ea0ee3
+      Built vllm-omni @ file:///home/ubuntu/cv3_wt/1ea0ee3
+Prepared 1 package in 1.71s
+Uninstalled 1 package in 1ms
+Installed 1 package in 1ms
+ ~ vllm-omni==0.1.dev3351+g1ea0ee3b3 (from file:///home/ubuntu/cv3_wt/1ea0ee3)

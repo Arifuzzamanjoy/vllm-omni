@@ -1,0 +1,40 @@
+Tried to measure this alongside #8235 on c85f1a4 (before #8224), 1ea0ee3 (#8224) and
+bbee488, all on FLASH_ATTN.
+
+Corrupted-output signals at C=8 (WER > 0.2, or duration > 1.3x the C=1 median of the
+same text and voice):
+
+  commit / config                   WER > 0.2   duration > 1.3x
+  c85f1a4 stock, 720 requests         2           11
+  1ea0ee3 stock, 360 requests         0            5
+  bbee488 stock, 720 requests         1           10
+  bbee488 talker max_num_seqs=4,      0            6
+    360 requests at C=8
+  C=1 reference, 120 requests         0            3-4
+
+With max_num_seqs=4 and 8 concurrent requests on bbee488, queued requests have to be
+admitted into running batches; there was no sign of inserted words or long audio. At
+c85f1a4 there was one output with extra words at the end ("... tomorrow morning. Blood
+Method Dave."), which looks like what you describe; the same request is clean on bbee488.
+One instance is not evidence on its own.
+
+Important gap: I did not run c85f1a4 with max_num_seqs=4, so there is no positive control
+for this issue, and I cannot say the clean result on bbee488 is caused by #8224
+(which does replace the decode-first assumption in embed_input_ids with query_start_loc
+boundaries). The duration counts are at the level of normal C=1 variation.
+
+Setup: 1x RTX 4090 24 GB, driver 580.95.05, Ubuntu 22.04, Python 3.12, vllm 0.30.0, torch 2.13.0+cu130,
+Fun-CosyVoice3-0.5B-2512, stock deploy/cosyvoice3.yaml (talker max_num_seqs 8, FLASH_ATTN),
+vllm-omni installed editable from a worktree of each commit.
+
+Method: voices registered with POST /v1/audio/voices, 120 seeded /v1/audio/speech requests
+per run, round-robin over K voices, four English texts of different lengths. Every output
+is scored against all K references with two independent speaker models (CAM++ campplus.onnx
+from the model, and WavLM-base-plus-SV); a leak counts only when both name the same wrong
+voice. Whisper-small WER and duration ratio for corrupted output.
+
+Kit: https://github.com/Arifuzzamanjoy/vllm-omni/tree/repro/cosyvoice3-voice-leak-8235
+
+Caveats: the FlashInfer sampler could not JIT on this machine (no nvcc), so all servers ran
+with VLLM_USE_FLASHINFER_SAMPLER=0 (PyTorch top-k/top-p), same for every commit; neither bug
+path goes through the sampler. One seed at C=1 per cell. Single GPU class.
