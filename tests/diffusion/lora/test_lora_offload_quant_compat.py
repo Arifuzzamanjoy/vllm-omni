@@ -10,16 +10,15 @@ the FP8 layers keep ``float8_e4m3fn`` weights and dequantize inside a stand-in
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any
-
 import pytest
 import torch
 import torch.nn.functional as F
 from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 
 from tests.diffusion.offloader.helpers import DummyStream, patch_offload_runtime
@@ -161,30 +160,29 @@ class _Pipeline(torch.nn.Module):
         self.transformer.qkv = _make_qkv(dtype, seed=22, fp8=fp8)
 
 
-class _Adapter:
-    def __init__(self, adapter_id: int, rank: int, dtype: torch.dtype, block_prefix: str = "transformer"):
-        self.id = adapter_id
-        self.rank = rank
-        self.loras = {}
-        for name, out_features, seed in (("proj", 24, 1), ("qkv", sum(QKV_SLICES), 2)):
-            lora_a, lora_b = _lora_pair(rank, out_features, dtype, seed=adapter_id * 100 + seed)
-            full_name = f"{block_prefix}.{name}"
-            self.loras[full_name] = LoRALayerWeights(
-                module_name=full_name, rank=rank, lora_alpha=rank, lora_a=lora_a, lora_b=lora_b
-            )
+def _peft(rank: int) -> PEFTHelper:
+    return PEFTHelper(r=rank, lora_alpha=rank, target_modules=["proj", "qkv"])
 
-    def get_lora(self, name: str):
-        return self.loras.get(name)
+
+def _adapter(adapter_id: int, rank: int, dtype: torch.dtype) -> LoRAModel:
+    loras = {}
+    for name, out_features, seed in (("proj", 24, 1), ("qkv", sum(QKV_SLICES), 2)):
+        lora_a, lora_b = _lora_pair(rank, out_features, dtype, seed=adapter_id * 100 + seed)
+        full_name = f"transformer.{name}"
+        loras[full_name] = LoRALayerWeights(
+            module_name=full_name, rank=rank, lora_alpha=rank, lora_a=lora_a, lora_b=lora_b
+        )
+    return LoRAModel(adapter_id, rank, loras)
 
 
 def _manager(
-    pipeline: torch.nn.Module, adapters: dict[int, Any], monkeypatch, device: torch.device = CPU
+    pipeline: torch.nn.Module, adapters: dict[int, LoRAModel], monkeypatch, device: torch.device = CPU
 ) -> DiffusionLoRAManager:
     manager = DiffusionLoRAManager(pipeline=pipeline, device=device, dtype=torch.float32, max_cached_adapters=4)
 
     def load_adapter(request: LoRARequest):
         adapter = adapters[request.lora_int_id]
-        return adapter, SimpleNamespace(r=adapter.rank, target_modules=None, lora_alpha=adapter.rank)
+        return adapter, _peft(adapter.rank)
 
     monkeypatch.setattr(manager, "_load_adapter", load_adapter)
     return manager
@@ -205,7 +203,7 @@ def _run(pipeline: _Pipeline, x: torch.Tensor) -> torch.Tensor:
     return torch.cat([_apply(transformer.proj, x), _apply(transformer.qkv, x)], dim=-1)
 
 
-def _expected(pipeline_base: _Pipeline, adapter: _Adapter | None, x: torch.Tensor, scale: float) -> torch.Tensor:
+def _expected(pipeline_base: _Pipeline, adapter: LoRAModel | None, x: torch.Tensor, scale: float) -> torch.Tensor:
     base = _run(pipeline_base, x)
     if adapter is None:
         return base
@@ -219,10 +217,10 @@ def _expected(pipeline_base: _Pipeline, adapter: _Adapter | None, x: torch.Tenso
 @pytest.mark.parametrize("fp8", [False, True])
 def test_adapter_switch_and_scale_change_match_fresh_activation(fp8, monkeypatch):
     adapters = {
-        1: _Adapter(1, rank=4, dtype=torch.float32),
-        2: _Adapter(2, rank=8, dtype=torch.float32),
+        1: _adapter(1, rank=4, dtype=torch.float32),
+        2: _adapter(2, rank=8, dtype=torch.float32),
         # Larger than the first allocation, so activating it re-allocates every buffer.
-        3: _Adapter(3, rank=32, dtype=torch.float32),
+        3: _adapter(3, rank=32, dtype=torch.float32),
     }
     x = torch.randn(6, HIDDEN, generator=torch.Generator().manual_seed(9))
     reference = _Pipeline(fp8=fp8)
@@ -280,7 +278,7 @@ def accelerator_device() -> torch.device:
 def test_rank_growth_reallocates_buffers_where_they_were_before(monkeypatch):
     pipeline = _Pipeline(fp8=True)
     manager = _manager(pipeline, {}, monkeypatch)
-    manager._replace_layers_with_lora(SimpleNamespace(r=4))
+    manager._replace_layers_with_lora(_peft(4))
     wrappers = list(manager._lora_modules.values())
     assert len(wrappers) == 2
     assert all(w.lora_a_stacked[0].shape[2] == 8 for w in wrappers)
@@ -302,7 +300,7 @@ def test_rank_growth_reallocates_buffers_where_they_were_before(monkeypatch):
 def test_lora_buffers_are_not_parameters_or_registered_buffers(monkeypatch):
     pipeline = _Pipeline(fp8=True)
     manager = _manager(pipeline, {}, monkeypatch)
-    manager._replace_layers_with_lora(SimpleNamespace(r=4))
+    manager._replace_layers_with_lora(_peft(4))
 
     registered = {id(t) for t in (*pipeline.parameters(), *pipeline.buffers())}
     for wrapper in manager._lora_modules.values():
@@ -312,7 +310,7 @@ def test_lora_buffers_are_not_parameters_or_registered_buffers(monkeypatch):
 def test_model_level_offload_moves_base_weights_but_not_lora_buffers(accelerator_device, monkeypatch):
     pipeline = _Pipeline(fp8=True).to(accelerator_device)
     manager = _manager(pipeline, {}, monkeypatch, accelerator_device)
-    manager._replace_layers_with_lora(SimpleNamespace(r=4))
+    manager._replace_layers_with_lora(_peft(4))
     wrappers = list(manager._lora_modules.values())
     for index, wrapper in enumerate(wrappers):
         _set_random_lora(wrapper, rank=4, seed=7 + index)
@@ -347,7 +345,7 @@ def test_sequential_offload_cycle_keeps_lora_output_and_buffers(accelerator_devi
             return _run(self, x)
 
     pipeline = _Pipeline(fp8=True).to(accelerator_device)
-    manager = _manager(pipeline, {1: _Adapter(1, rank=4, dtype=torch.float32)}, monkeypatch, accelerator_device)
+    manager = _manager(pipeline, {1: _adapter(1, rank=4, dtype=torch.float32)}, monkeypatch, accelerator_device)
     manager.set_active_adapter(_request(1), 1.0)
     wrappers = list(manager._lora_modules.values())
     tensors = [t for w in wrappers for t in _lora_tensors(w)]
@@ -394,12 +392,12 @@ def test_layerwise_offload_hooks_keep_lora_correct_when_wrapped_after_hook_insta
     layerwise_backend_module._install_layerwise_hook_group(blocks, CPU, DummyStream(), False)
     assert all(block.proj.weight.numel() == 0 for block in blocks)
 
-    adapter = SimpleNamespace(id=5, rank=4, loras={})
+    loras = {}
     for index in range(len(blocks)):
         name = f"transformer.blocks.{index}.proj"
         lora_a, lora_b = _lora_pair(4, 24, torch.float32, seed=60 + index)
-        adapter.loras[name] = LoRALayerWeights(module_name=name, rank=4, lora_alpha=4, lora_a=lora_a, lora_b=lora_b)
-    adapter.get_lora = adapter.loras.get
+        loras[name] = LoRALayerWeights(module_name=name, rank=4, lora_alpha=4, lora_a=lora_a, lora_b=lora_b)
+    adapter = LoRAModel(5, 4, loras)
     manager = _manager(pipeline, {5: adapter}, monkeypatch)
 
     seen_tensors: list[torch.Tensor] = []
