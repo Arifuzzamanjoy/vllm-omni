@@ -48,6 +48,10 @@ class DiffusionLoRAManager:
     # Valid max allowed ranks for LoRA in vLLM
     _VALID_MAX_RANKS: list[int] = sorted(get_args(MaxLoRARanks))
 
+    # DLO layers must be able to pin their buffers. Class-level so a manager built
+    # without __init__ (some tests use object.__new__) reads as not required.
+    _require_resident_lora_device: bool = False
+
     # Adapter whose weights are still uploaded while gated off. Class-level so
     # a manager built without __init__ (some tests use object.__new__) reads as
     # "nothing suspended" instead of raising.
@@ -78,12 +82,15 @@ class DiffusionLoRAManager:
         from vllm_omni.diffusion.offloader.config import OffloadStrategy, resolve_offload_strategy
 
         od_config = getattr(pipeline, "od_config", None)
-        # DLO owns the base-weight lifecycle. Keep request-switchable LoRA
-        # sidecars resident instead of rebuilding DLO host shards per request.
-        self._resident_lora_device = (
-            device
-            if od_config is not None and resolve_offload_strategy(od_config) is OffloadStrategy.DISTRIBUTED_LAYER_WISE
-            else None
+        # LoRA A/B buffers are plain tensors, so no offload strategy moves them.
+        # Keep them on the compute device instead of next to the base weight:
+        # a startup ``lora_path`` wraps the layers before the first forward,
+        # while offload still holds the base weights off the device.
+        self._resident_lora_device = device
+        # DLO owns the base-weight lifecycle, so it also needs request-switchable
+        # LoRA sidecars to stay resident instead of rebuilding host shards per request.
+        self._require_resident_lora_device = (
+            od_config is not None and resolve_offload_strategy(od_config) is OffloadStrategy.DISTRIBUTED_LAYER_WISE
         )
 
         # Cache supported/expected module suffixes once, before any layer
@@ -472,11 +479,12 @@ class DiffusionLoRAManager:
                 if lora_layer is not module and isinstance(lora_layer, BaseLayerWithLoRA):
                     if self._resident_lora_device is not None:
                         set_buffer_device = getattr(lora_layer, "_set_diffusion_lora_buffer_device", None)
-                        if not callable(set_buffer_device):
+                        if callable(set_buffer_device):
+                            set_buffer_device(self._resident_lora_device)
+                        elif self._require_resident_lora_device:
                             raise RuntimeError(
                                 f"{type(lora_layer).__name__} cannot keep dynamic LoRA buffers resident for DLO"
                             )
-                        set_buffer_device(self._resident_lora_device)
                     replace_submodule(component, module_name, lora_layer)
                     self._lora_modules[full_module_name] = lora_layer
                     logger.debug("Replaced layer: %s -> %s", full_module_name, type(lora_layer).__name__)
