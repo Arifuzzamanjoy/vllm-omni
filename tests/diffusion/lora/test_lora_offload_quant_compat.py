@@ -177,8 +177,10 @@ class _Adapter:
         return self.loras.get(name)
 
 
-def _manager(pipeline: torch.nn.Module, adapters: dict[int, Any], monkeypatch) -> DiffusionLoRAManager:
-    manager = DiffusionLoRAManager(pipeline=pipeline, device=CPU, dtype=torch.float32, max_cached_adapters=4)
+def _manager(
+    pipeline: torch.nn.Module, adapters: dict[int, Any], monkeypatch, device: torch.device = CPU
+) -> DiffusionLoRAManager:
+    manager = DiffusionLoRAManager(pipeline=pipeline, device=device, dtype=torch.float32, max_cached_adapters=4)
 
     def load_adapter(request: LoRARequest):
         adapter = adapters[request.lora_int_id]
@@ -275,7 +277,7 @@ def accelerator_device() -> torch.device:
     return current_omni_platform.get_torch_device(0)
 
 
-def test_rank_growth_reallocates_buffers_on_the_wrap_time_device(monkeypatch):
+def test_rank_growth_reallocates_buffers_where_they_were_before(monkeypatch):
     pipeline = _Pipeline(fp8=True)
     manager = _manager(pipeline, {}, monkeypatch)
     manager._replace_layers_with_lora(SimpleNamespace(r=4))
@@ -309,8 +311,7 @@ def test_lora_buffers_are_not_parameters_or_registered_buffers(monkeypatch):
 
 def test_model_level_offload_moves_base_weights_but_not_lora_buffers(accelerator_device, monkeypatch):
     pipeline = _Pipeline(fp8=True).to(accelerator_device)
-    manager = _manager(pipeline, {}, monkeypatch)
-    manager.device = accelerator_device
+    manager = _manager(pipeline, {}, monkeypatch, accelerator_device)
     manager._replace_layers_with_lora(SimpleNamespace(r=4))
     wrappers = list(manager._lora_modules.values())
     for index, wrapper in enumerate(wrappers):
@@ -346,8 +347,7 @@ def test_sequential_offload_cycle_keeps_lora_output_and_buffers(accelerator_devi
             return _run(self, x)
 
     pipeline = _Pipeline(fp8=True).to(accelerator_device)
-    manager = _manager(pipeline, {1: _Adapter(1, rank=4, dtype=torch.float32)}, monkeypatch)
-    manager.device = accelerator_device
+    manager = _manager(pipeline, {1: _Adapter(1, rank=4, dtype=torch.float32)}, monkeypatch, accelerator_device)
     manager.set_active_adapter(_request(1), 1.0)
     wrappers = list(manager._lora_modules.values())
     tensors = [t for w in wrappers for t in _lora_tensors(w)]
