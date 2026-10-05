@@ -244,7 +244,7 @@ The following tables show which models support each feature:
 | **💾CPU Offloading (Module-wise)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❓ | ❓ | ❌ | | | | | |
 | **💾VAE Patch Parallel** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | | | | |
 | **💾FP8 Quant** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❓ | ❓ | ✅ | ✅ | ✅ | | | |
-| **🔧LoRA Inference** | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | | |
+| **🔧LoRA Inference** | ✅ | ✅ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ✅ | | |
 | **🔄Step Execution** | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ❓ | ❓ | ✅ | ❓ | ✅ | ✅ | ✅ | |
 
 !!! info
@@ -259,6 +259,16 @@ The following tables show which models support each feature:
        compatibility matrix in the [Distributed Layerwise Offloading guide](diffusion/offloader/distributed_layerwise_offload.md).
     5. The compatibility matrix uses FP8 as the representative quantization method.
     6. Step Execution is not compatible with any diffusion cache backend. LoRA is supported, but each scheduled batch must use a single adapter (requests with different `lora_request` or `lora_scale` are kept in separate batches).
+    7. The LoRA Inference row was verified on `black-forest-labs/FLUX.2-klein-4B`
+       on a single RTX 4080 SUPER (16 GB), with synthetic rank-16 PEFT adapters
+       and one public adapter (`vladimir94/flux2-klein-4b-stamp-filter`). Each ✅
+       means the adapter changed the output, switching synthetic adapters and
+       scales reproduced the first result, and the feature's effect on the output
+       was comparable to its effect without LoRA. TeaCache and Cache-DiT make no
+       difference at klein's default 4 steps, so they were verified at 20 steps. The two CPU Offloading cells are not
+       marked yet: they are pending a fix for adapters passed through `lora_path`
+       at engine startup, which fail under both offload modes. Cells that need
+       more than one GPU were not tested.
 
 ## Multi-Thread Weight Loading
 
