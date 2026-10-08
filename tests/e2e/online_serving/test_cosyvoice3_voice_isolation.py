@@ -1,0 +1,378 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+"""
+Cross-request voice isolation check for CosyVoice3 voice cloning (#8555).
+
+Under concurrency a voice-cloning request can come back in the voice of another
+request that is in flight at the same time (#8235, fixed by #8224). This test
+sends N seeded requests round-robin over K reference voices and asserts that
+every output is closest to its own reference.
+
+How an output is judged
+* Two independent speaker embedders score it against all K references:
+  CosyVoice3's own CAM++ (``campplus.onnx`` from the model snapshot) and
+  ``microsoft/wavlm-base-plus-sv``.
+* A mismatch counts only when both embedders pick the same wrong voice. One
+  embedder alone has flagged a mostly non-speech output before.
+* The check runs on the full output and again on its first 2 s only.
+* Zero mismatches are allowed. Outputs the embedders disagree on are logged.
+* Speech content is checked separately with the repo's ASR assertion, so a
+  content failure is never reported as a voice leak.
+
+Requests carry the reference audio and its transcript in the request body
+(``ref_audio`` / ``ref_text``), the same way ``test_cosyvoice3_tts_expansion.py``
+does. This is the per-request conditioning path, which is the one a shared
+batch can mix up. Registered voices (``/v1/audio/voices``) are not used.
+
+Controls: the same requests at concurrency 1 in async-chunk mode and in
+``--no-async-chunk`` mode. They show the scorer is clean when nothing is in
+flight.
+
+Voices and measured margins (main, one request at a time; margin = own score
+minus best other score, so a negative margin is a wrong argmax)
+
+* zero_shot  cosyvoice3/zero_shot_prompt.wav, 3.5 s, zh
+* clone_2    qwen3_tts/clone_2.wav, 8.1 s, en
+* jiayan_zh  glm_tts/jiayan_zh.wav, 5.5 s, zh
+* indextts2  indextts2/ref_audio.wav, 2.4 s, zh (transcript from Whisper)
+
+Reference-vs-reference cosine (zero_shot, clone_2, jiayan_zh, indextts2)::
+
+    CAM++                                WavLM-SV
+     1.000  0.342  0.298 -0.082           1.000  0.813  0.378  0.405
+     0.342  1.000  0.049 -0.013           0.813  1.000  0.180  0.381
+     0.298  0.049  1.000 -0.130           0.378  0.180  1.000  0.417
+    -0.082 -0.013 -0.130  1.000           0.405  0.381  0.417  1.000
+
+Minimum margin per voice over its 8 outputs (two independent runs of the 32
+requests; CAM++ | WavLM-SV)::
+
+                       full output        first 2 s
+                       CAM++   WavLM      CAM++   WavLM
+    run 1 zero_shot   +0.097  -0.056     -0.096  -0.055
+    run 1 clone_2     +0.457  +0.126     +0.360  +0.084
+    run 1 jiayan_zh   +0.371  +0.435     +0.163  +0.305
+    run 1 indextts2   +0.273  +0.020     +0.184  -0.015
+    run 2 zero_shot   +0.124  -0.040     +0.079  -0.018
+    run 2 clone_2     +0.445  +0.115     +0.364  +0.076
+    run 2 jiayan_zh   +0.363  +0.426     +0.278  +0.336
+    run 2 indextts2   +0.239  -0.043     +0.224  -0.160
+
+WavLM-SV separation is weak for zero_shot and indextts2: with a single request in
+flight it already picks the wrong voice for some of their outputs, and the
+zero_shot / clone_2 references are 0.81 apart in WavLM space. The repo has no
+better 4-voice set (other clips are the same speaker or close in WavLM space),
+so detection leans on CAM++. Requiring agreement only removes flags relative to
+either embedder alone: a weak embedder can make the check miss a leak, and it
+cannot add a failure that the other embedder would not also raise. On main, one request at a time,
+no output had both embedders on the same wrong voice. No margin threshold is
+used, because margins move from run to run (CAM++ alone dipped below zero on a
+2 s window once).
+
+Reproduce::
+
+    pytest -s -v tests/e2e/online_serving/test_cosyvoice3_voice_isolation.py \\
+        --run-level full_model
+"""
+
+from __future__ import annotations
+
+import os
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from tests.helpers.assertions import assert_audio_speech_response
+from tests.helpers.client import OmniResponse
+from tests.helpers.mark import hardware_test
+from tests.helpers.media import get_asset_path
+from tests.helpers.runtime import OmniServerParams
+from tests.helpers.speaker_similarity import (
+    LABEL_DISAGREE,
+    LABEL_WRONG_BOTH_AGREE,
+    WAVLM_SV_MODEL,
+    CampPlusEmbedder,
+    FailureReport,
+    OutputScore,
+    SpeakerEmbedder,
+    WavLMSVEmbedder,
+    embed_references,
+    format_table,
+    load_audio_16k,
+    min_margins,
+    reference_matrix,
+    retain_failed_voice_isolation,
+    score,
+    wrong_both_agree,
+)
+from tests.helpers.stage_config import get_deploy_config_path
+from vllm_omni.platforms import current_omni_platform
+
+if current_omni_platform.is_rocm():
+    os.environ.setdefault("COSYVOICE3_TRT", "0")
+
+pytestmark = [
+    pytest.mark.full_model,
+    pytest.mark.tts,
+]
+
+MODEL = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
+
+# Reference voices: (asset under tests/assets, transcript). Transcripts come from
+# the tests that already use each clip.
+VOICES: dict[str, tuple[str, str]] = {
+    "zero_shot": ("cosyvoice3/zero_shot_prompt.wav", "希望你以后能够做的比我还好呦。"),
+    "clone_2": (
+        "qwen3_tts/clone_2.wav",
+        "Okay. Yeah. I resent you. I love you. I respect you. But you know what? You blew it! And thanks to you.",
+    ),
+    "jiayan_zh": ("glm_tts/jiayan_zh.wav", "他当时还跟线下其他的站姐吵架，然后，打架进局子了。"),
+    "indextts2": ("indextts2/ref_audio.wav", "翻译翻译，什么叫惊喜。"),
+}
+
+# English targets of clearly different lengths. The text index is decorrelated
+# from the voice index so requests finish at different steps and new requests
+# are admitted into batches that are already running.
+TEXTS = [
+    "Thank you so much for the birthday gift you sent me last week.",
+    "The weather is lovely today, with warm sunshine and a gentle breeze, so we decided to walk in the park.",
+    "Please remember to bring your notebook and a pen to the meeting tomorrow morning.",
+    "After the long winter, the farmers were glad to see the first green shoots appear in the fields, "
+    "and the children ran outside to play until the sun went down behind the hills.",
+]
+
+N_REQUESTS = 32
+BASE_SEED = 1
+CONCURRENCY = 8
+FIRST_WINDOW_S = 2.0
+REQUEST_TIMEOUT_S = 600.0
+
+
+def _server_params(*extra_args: str):
+    return OmniServerParams(
+        model=MODEL,
+        stage_config_path=get_deploy_config_path("cosyvoice3.yaml"),
+        server_args=["--trust-remote-code", *extra_args],
+    )
+
+
+ASYNC_CHUNK = pytest.param(_server_params(), id="async_chunk")
+NO_ASYNC_CHUNK = pytest.param(_server_params("--no-async-chunk"), id="no_async_chunk")
+
+
+@dataclass
+class RunResult:
+    mode: str
+    concurrency: int
+    requests: list[dict[str, Any]]
+    audio: list[bytes]
+    wall_s: float
+    full: list[OutputScore]
+    first: list[OutputScore]
+
+
+def _git_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent, text=True
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def plan_requests(n: int = N_REQUESTS, base_seed: int = BASE_SEED) -> list[dict[str, Any]]:
+    names = list(VOICES)
+    k = len(names)
+    return [
+        {
+            "idx": i,
+            "voice": names[i % k],
+            "text_idx": (i // k) % len(TEXTS),
+            "text": TEXTS[(i // k) % len(TEXTS)],
+            "seed": base_seed * 1000 + i,
+        }
+        for i in range(n)
+    ]
+
+
+@pytest.fixture(scope="module")
+def reference_audio_urls() -> dict[str, str]:
+    return {name: get_asset_path(rel, as_data_url=True) for name, (rel, _) in VOICES.items()}
+
+
+@pytest.fixture(scope="module")
+def scorers():
+    """Embedders and reference embeddings. Both embedders run on CPU, next to the server."""
+    from huggingface_hub import snapshot_download
+
+    embedders: list[SpeakerEmbedder] = [
+        CampPlusEmbedder(snapshot_download(MODEL, allow_patterns=["campplus.onnx"])),
+        WavLMSVEmbedder(WAVLM_SV_MODEL, device="cpu"),
+    ]
+    refs = {name: load_audio_16k(get_asset_path(rel)) for name, (rel, _) in VOICES.items()}
+    return {
+        "embedders": embedders,
+        "refs": refs,
+        "ref_emb": embed_references(refs, embedders),
+        "ref_matrix": reference_matrix(refs, embedders),
+    }
+
+
+# One generation per (server mode, concurrency); the speaker tests and the ASR
+# test of a mode share it instead of regenerating.
+_RUNS: dict[tuple[str, int], RunResult] = {}
+
+
+def _send(client, model: str, req: dict[str, Any], urls: dict[str, str]) -> bytes:
+    resp = client.client.audio.speech.create(
+        model=model,
+        input=req["text"],
+        voice=None,
+        response_format="wav",
+        extra_body={
+            "ref_audio": urls[req["voice"]],
+            "ref_text": VOICES[req["voice"]][1],
+            "seed": req["seed"],
+        },
+        timeout=REQUEST_TIMEOUT_S,
+    )
+    return resp.read()
+
+
+def _get_run(mode: str, concurrency: int, omni_server, online_client, urls, scorers) -> RunResult:
+    key = (mode, concurrency)
+    if key in _RUNS:
+        return _RUNS[key]
+    requests = plan_requests()
+    t0 = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(_send, online_client, omni_server.model, r, urls) for r in requests]
+        audio = [f.result() for f in futures]
+    wall = time.perf_counter() - t0
+
+    outputs = [(r["voice"], a) for r, a in zip(requests, audio)]
+    kwargs = {"reference_embeddings": scorers["ref_emb"]}
+    full = score(outputs, scorers["refs"], scorers["embedders"], window=None, **kwargs)
+    first = score(outputs, scorers["refs"], scorers["embedders"], window=FIRST_WINDOW_S, **kwargs)
+
+    print(f"\n=== voice isolation: mode={mode} concurrency={concurrency} n={len(requests)} wall={wall:.1f}s ===")
+    print(format_table(full, first, [len(r["text"]) for r in requests]))
+    for label, results in (("full", full), ("first_2s", first)):
+        counts: dict[str, int] = {}
+        for r in results:
+            counts[r.label] = counts.get(r.label, 0) + 1
+        alone = {n: sum(r.argmax[n] != r.voice for r in results) for n in results[0].margin}
+        print(
+            f"{label}: labels={counts} disagree={counts.get(LABEL_DISAGREE, 0)} "
+            f"wrong_both_agree={counts.get(LABEL_WRONG_BOTH_AGREE, 0)} "
+            f"wrong_by_one_embedder={alone} min_margin={ {k: round(v, 4) for k, v in min_margins(results).items()} }"
+        )
+    short = [r.idx for r in first if r.window_short]
+    if short:
+        print(f"first_2s: outputs shorter than {FIRST_WINDOW_S}s, scored whole: {short}")
+
+    run = RunResult(mode, concurrency, requests, audio, wall, full, first)
+    _RUNS[key] = run
+    return run
+
+
+def _assert_no_leak(test: str, run: RunResult, scorers) -> None:
+    leaks_full = wrong_both_agree(run.full)
+    leaks_first = wrong_both_agree(run.first)
+    if leaks_full or leaks_first:
+        retain_failed_voice_isolation(
+            FailureReport(
+                test=test,
+                voices={n: rel for n, (rel, _) in VOICES.items()},
+                requests=run.requests,
+                full=run.full,
+                first=run.first,
+                audio=run.audio,
+                reference_matrix=scorers["ref_matrix"],
+                extra={"git_sha": _git_sha(), "mode": run.mode, "concurrency": run.concurrency},
+            )
+        )
+
+    def describe(results: list[OutputScore]) -> str:
+        return ", ".join(f"req {r.idx} ({r.voice} -> {r.wrong_voice})" for r in results)
+
+    assert not leaks_full, (
+        f"voice leak on full output: {len(leaks_full)}/{len(run.full)} outputs have the wrong voice "
+        f"under both embedders: {describe(leaks_full)}"
+    )
+    assert not leaks_first, (
+        f"voice leak in the first {FIRST_WINDOW_S}s: {len(leaks_first)}/{len(run.first)} outputs have the "
+        f"wrong voice under both embedders: {describe(leaks_first)}"
+    )
+
+
+def _asr_failures(run: RunResult) -> list[str]:
+    failures = []
+    for req, audio in zip(run.requests, run.audio):
+        response = OmniResponse(success=True, audio_bytes=audio, audio_format="audio/wav")
+        config = {"response_format": "wav", "input": req["text"]}
+        try:
+            assert_audio_speech_response(response, config, run_level="full_model")
+        except AssertionError as exc:
+            failures.append(f"req {req['idx']} ({req['voice']}, mode={run.mode}, c={run.concurrency}): {exc}")
+    return failures
+
+
+@hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
+@pytest.mark.parametrize("omni_server", [ASYNC_CHUNK], indirect=True)
+def test_voice_isolation_concurrent(omni_server, online_client, reference_audio_urls, scorers) -> None:
+    """
+    Concurrent requests must each come back in their own reference voice.
+    Deploy Setting: cosyvoice3.yaml, async_chunk on (default)
+    Input Modal: text + ref_audio + ref_text
+    Output Modal: audio
+    Input Setting: 32 seeded requests, round-robin over 4 voices, concurrency 8
+    Datasets: tests/assets reference clips
+    """
+    run = _get_run("async_chunk", CONCURRENCY, omni_server, online_client, reference_audio_urls, scorers)
+    _assert_no_leak("concurrent", run, scorers)
+
+
+@hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
+@pytest.mark.parametrize("omni_server", [ASYNC_CHUNK, NO_ASYNC_CHUNK], indirect=True)
+def test_voice_isolation_control_c1(request, omni_server, online_client, reference_audio_urls, scorers) -> None:
+    """
+    Control: the same requests one at a time. Nothing is in flight, so the scorer must be clean.
+    Deploy Setting: cosyvoice3.yaml, async_chunk on and ``--no-async-chunk``
+    Input Modal: text + ref_audio + ref_text
+    Output Modal: audio
+    Input Setting: 32 seeded requests, round-robin over 4 voices, concurrency 1
+    Datasets: tests/assets reference clips
+    """
+    mode = request.node.callspec.id.split("-")[-1]
+    run = _get_run(mode, 1, omni_server, online_client, reference_audio_urls, scorers)
+    _assert_no_leak(f"control_c1_{mode}", run, scorers)
+
+
+@hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
+@pytest.mark.parametrize("omni_server", [ASYNC_CHUNK, NO_ASYNC_CHUNK], indirect=True)
+def test_voice_isolation_asr(request, omni_server, online_client, reference_audio_urls, scorers) -> None:
+    """
+    Speech content of every output of this server mode, as its own failure.
+    A failure here is a content problem, not a voice leak.
+    Deploy Setting: cosyvoice3.yaml, async_chunk on and ``--no-async-chunk``
+    Input Modal: text + ref_audio + ref_text
+    Output Modal: audio
+    Input Setting: outputs of the speaker tests, generated here if they did not run
+    Datasets: tests/assets reference clips
+    """
+    mode = request.node.callspec.id.split("-")[-1]
+    concurrencies = [CONCURRENCY, 1] if mode == "async_chunk" else [1]
+    failures: list[str] = []
+    for c in concurrencies:
+        run = _get_run(mode, c, omni_server, online_client, reference_audio_urls, scorers)
+        failures += _asr_failures(run)
+    assert not failures, "ASR content check failed (not a voice leak):\n" + "\n".join(failures)
