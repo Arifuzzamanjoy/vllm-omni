@@ -212,7 +212,7 @@ def reference_audio_urls() -> dict[str, str]:
 
 @pytest.fixture(scope="module")
 def scorers():
-    """Embedders and reference embeddings. Both embedders run on CPU, next to the server."""
+    """Embedders and reference embeddings. Both embedders run on CPU, after the ``generated`` server has stopped."""
     from huggingface_hub import snapshot_download
 
     embedders: list[SpeakerEmbedder] = [
