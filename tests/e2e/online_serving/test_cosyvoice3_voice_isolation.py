@@ -407,7 +407,9 @@ def _asr_failures(mode: str, source: str, concurrency: int, gen: dict[str, Any])
     failures = []
     for req, audio in zip(gen["requests"], gen["audio"]):
         response = OmniResponse(success=True, audio_bytes=audio, audio_format="audio/wav")
-        config = {"response_format": "wav", "input": req["text"]}
+        # Every text is English. Left on auto-detect, Whisper labels English spoken in a
+        # Chinese reference voice as zh or ko and returns an unrelated transcript.
+        config = {"response_format": "wav", "input": req["text"], "transcript_language": "en"}
         try:
             assert_audio_speech_response(response, config, run_level="full_model")
         except AssertionError as exc:
