@@ -217,8 +217,10 @@ def scorers():
     }
 
 
-# One generation per (server mode, concurrency); the speaker tests and the ASR
-# test of a mode share it instead of regenerating.
+# Outputs per (server mode, concurrency), filled by the ``generated`` fixture while
+# its server is up, then scored by the speaker tests and checked by the ASR test.
+_GENERATED: dict[tuple[str, int], dict[str, Any]] = {}
+# Scored runs, so the speaker tests of a mode score each run once.
 _RUNS: dict[tuple[str, int], RunResult] = {}
 
 
@@ -238,16 +240,51 @@ def _send(client, model: str, req: dict[str, Any], urls: dict[str, str]) -> byte
     return resp.read()
 
 
-def _get_run(mode: str, concurrency: int, omni_server, online_client, urls, scorers) -> RunResult:
-    key = (mode, concurrency)
-    if key in _RUNS:
-        return _RUNS[key]
+def _generate(client, model: str, concurrency: int, urls: dict[str, str]) -> dict[str, Any]:
     requests = plan_requests()
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(_send, online_client, omni_server.model, r, urls) for r in requests]
+        futures = [pool.submit(_send, client, model, r, urls) for r in requests]
         audio = [f.result() for f in futures]
-    wall = time.perf_counter() - t0
+    return {"requests": requests, "audio": audio, "wall_s": time.perf_counter() - t0}
+
+
+@pytest.fixture(
+    scope="module",
+    params=[ASYNC_CHUNK, NO_ASYNC_CHUNK],
+)
+def generated(request, run_level, reference_audio_urls) -> str:
+    """Start one server for this mode, generate every run of the mode, then shut it down.
+
+    The server is stopped before this fixture returns, so scoring and the ASR check
+    run with the GPU free (Whisper then uses the GPU instead of falling back to CPU
+    next to the server). Returns the mode id.
+    """
+    from tests.helpers.client import OnlineOmniClient
+    from tests.helpers.fixtures.runtime import omni_fixture_lock
+    from tests.helpers.runtime import iter_omni_server
+
+    mode = "no_async_chunk" if "--no-async-chunk" in (request.param.server_args or []) else "async_chunk"
+    concurrencies = [CONCURRENCY, 1] if mode == "async_chunk" else [1]
+    gen = iter_omni_server(request, run_level, omni_fixture_lock)
+    server = next(gen)
+    try:
+        client = OnlineOmniClient(
+            host=server.host, port=server.port, api_key="EMPTY", run_level=run_level, log_stats=server.log_stats
+        )
+        for c in concurrencies:
+            _GENERATED[(mode, c)] = _generate(client, server.model, c, reference_audio_urls)
+    finally:
+        gen.close()  # stops the server and releases its GPU memory
+    return mode
+
+
+def _get_run(mode: str, concurrency: int, scorers) -> RunResult:
+    key = (mode, concurrency)
+    if key in _RUNS:
+        return _RUNS[key]
+    gen = _GENERATED[key]
+    requests, audio, wall = gen["requests"], gen["audio"], gen["wall_s"]
 
     outputs = [(r["voice"], a) for r, a in zip(requests, audio)]
     kwargs = {"reference_embeddings": scorers["ref_emb"]}
@@ -305,21 +342,21 @@ def _assert_no_leak(test: str, run: RunResult, scorers) -> None:
     )
 
 
-def _asr_failures(run: RunResult) -> list[str]:
+def _asr_failures(mode: str, concurrency: int, gen: dict[str, Any]) -> list[str]:
     failures = []
-    for req, audio in zip(run.requests, run.audio):
+    for req, audio in zip(gen["requests"], gen["audio"]):
         response = OmniResponse(success=True, audio_bytes=audio, audio_format="audio/wav")
         config = {"response_format": "wav", "input": req["text"]}
         try:
             assert_audio_speech_response(response, config, run_level="full_model")
         except AssertionError as exc:
-            failures.append(f"req {req['idx']} ({req['voice']}, mode={run.mode}, c={run.concurrency}): {exc}")
+            failures.append(f"req {req['idx']} ({req['voice']}, mode={mode}, c={concurrency}): {exc}")
     return failures
 
 
 @hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
-@pytest.mark.parametrize("omni_server", [ASYNC_CHUNK], indirect=True)
-def test_voice_isolation_concurrent(omni_server, online_client, reference_audio_urls, scorers) -> None:
+@pytest.mark.parametrize("generated", [ASYNC_CHUNK], indirect=True)
+def test_voice_isolation_concurrent(generated, scorers) -> None:
     """
     Concurrent requests must each come back in their own reference voice.
     Deploy Setting: cosyvoice3.yaml, async_chunk on (default)
@@ -328,13 +365,13 @@ def test_voice_isolation_concurrent(omni_server, online_client, reference_audio_
     Input Setting: 32 seeded requests, round-robin over 3 voices, concurrency 8
     Datasets: tests/assets reference clips
     """
-    run = _get_run("async_chunk", CONCURRENCY, omni_server, online_client, reference_audio_urls, scorers)
+    run = _get_run(generated, CONCURRENCY, scorers)
     _assert_no_leak("concurrent", run, scorers)
 
 
 @hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
-@pytest.mark.parametrize("omni_server", [ASYNC_CHUNK, NO_ASYNC_CHUNK], indirect=True)
-def test_voice_isolation_control_c1(request, omni_server, online_client, reference_audio_urls, scorers) -> None:
+@pytest.mark.parametrize("generated", [ASYNC_CHUNK, NO_ASYNC_CHUNK], indirect=True)
+def test_voice_isolation_control_c1(generated, scorers) -> None:
     """
     Control: the same requests one at a time. Nothing is in flight, so the scorer must be clean.
     Deploy Setting: cosyvoice3.yaml, async_chunk on and ``--no-async-chunk``
@@ -343,9 +380,8 @@ def test_voice_isolation_control_c1(request, omni_server, online_client, referen
     Input Setting: 32 seeded requests, round-robin over 3 voices, concurrency 1
     Datasets: tests/assets reference clips
     """
-    mode = request.node.callspec.id.split("-")[-1]
-    run = _get_run(mode, 1, omni_server, online_client, reference_audio_urls, scorers)
-    _assert_no_leak(f"control_c1_{mode}", run, scorers)
+    run = _get_run(generated, 1, scorers)
+    _assert_no_leak(f"control_c1_{generated}", run, scorers)
 
 
 def _wait_for_free_vram(min_free_gib: float = 16.0, timeout_s: float = 120.0) -> None:
@@ -367,13 +403,13 @@ def test_voice_isolation_asr(monkeypatch) -> None:
     """
     Speech content of every generated output, as its own failure after the speaker tests.
     A failure here is a content problem, not a voice leak.
-    The servers have exited by now (this test uses no server fixture), so Whisper can use the GPU;
+    The servers have exited by now (the ``generated`` fixture stops them), so Whisper can use the GPU;
     on CPU its threads are capped so it does not oversubscribe a large host.
     Input Setting: the outputs kept by the speaker tests of this module
     """
     from tests.helpers.media import release_audio_transcriber
 
-    if not _RUNS:
+    if not _GENERATED:
         pytest.skip("no generated outputs: run together with the speaker tests")
     release_audio_transcriber()
     threads = max(1, min(16, (os.cpu_count() or 2) // 2))
@@ -383,10 +419,10 @@ def test_voice_isolation_asr(monkeypatch) -> None:
     failures: list[str] = []
     t0 = time.perf_counter()
     try:
-        for key in sorted(_RUNS):
-            failures += _asr_failures(_RUNS[key])
+        for (mode, c), gen in sorted(_GENERATED.items()):
+            failures += _asr_failures(mode, c, gen)
     finally:
         release_audio_transcriber()
-    n = sum(len(r.audio) for r in _RUNS.values())
+    n = sum(len(g["audio"]) for g in _GENERATED.values())
     print(f"ASR check: {n} outputs in {time.perf_counter() - t0:.0f}s ({threads} CPU threads if on CPU)")
     assert not failures, "ASR content check failed (not a voice leak):\n" + "\n".join(failures)
