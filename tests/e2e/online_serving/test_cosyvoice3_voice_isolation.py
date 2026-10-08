@@ -28,46 +28,38 @@ Controls: the same requests at concurrency 1 in async-chunk mode and in
 ``--no-async-chunk`` mode. They show the scorer is clean when nothing is in
 flight.
 
-Voices and measured margins (main, one request at a time; margin = own score
-minus best other score, so a negative margin is a wrong argmax)
+Voices (K=3, a deliberate change from the K=4 in #8555)
 
-* zero_shot  cosyvoice3/zero_shot_prompt.wav, 3.5 s, zh
 * clone_2    qwen3_tts/clone_2.wav, 8.1 s, en
 * jiayan_zh  glm_tts/jiayan_zh.wav, 5.5 s, zh
-* indextts2  indextts2/ref_audio.wav, 2.4 s, zh (transcript from Whisper)
+* indextts2  indextts2/ref_audio.wav, 2.4 s, zh (transcript from Whisper small; large-v3 differs
+  on the first word, "翻译翻译" vs "翻一翻一")
 
-Reference-vs-reference cosine (zero_shot, clone_2, jiayan_zh, indextts2)::
+The fourth repo clip, cosyvoice3/zero_shot_prompt.wav, was dropped. On main, one
+request at a time, the first 2 s of its outputs sit almost on the boundary to
+clone_2 under both embedders (CAM++ 0.6005 vs 0.6295, WavLM-SV 0.8215 vs 0.8718
+for one output). That gave 1 false failure (both embedders on clone_2) in 128
+scored 2 s windows, and CAM++ alone picked the wrong voice for such a window in
+3 of the 4 runs. The other repo clips are the same speaker as these three or sit
+close to one of them. If reviewers want K=4, a LibriTTS-R voice (CC BY 4.0, e.g.
+speaker 8230) is the candidate; it would have to be vendored.
 
-    CAM++                                WavLM-SV
-     1.000  0.342  0.298 -0.082           1.000  0.813  0.378  0.405
-     0.342  1.000  0.049 -0.013           0.813  1.000  0.180  0.381
-     0.298  0.049  1.000 -0.130           0.378  0.180  1.000  0.417
-    -0.082 -0.013 -0.130  1.000           0.405  0.381  0.417  1.000
+Reference-vs-reference cosine (clone_2, jiayan_zh, indextts2)::
 
-Minimum margin per voice over its 8 outputs (two independent runs of the 32
-requests; CAM++ | WavLM-SV)::
+    CAM++                    WavLM-SV
+     1.000  0.049 -0.013      1.000  0.180  0.381
+     0.049  1.000 -0.130      0.180  1.000  0.417
+    -0.013 -0.130  1.000      0.381  0.417  1.000
 
-                       full output        first 2 s
-                       CAM++   WavLM      CAM++   WavLM
-    run 1 zero_shot   +0.097  -0.056     -0.096  -0.055
-    run 1 clone_2     +0.457  +0.126     +0.360  +0.084
-    run 1 jiayan_zh   +0.371  +0.435     +0.163  +0.305
-    run 1 indextts2   +0.273  +0.020     +0.184  -0.015
-    run 2 zero_shot   +0.124  -0.040     +0.079  -0.018
-    run 2 clone_2     +0.445  +0.115     +0.364  +0.076
-    run 2 jiayan_zh   +0.363  +0.426     +0.278  +0.336
-    run 2 indextts2   +0.239  -0.043     +0.224  -0.160
-
-WavLM-SV separation is weak for zero_shot and indextts2: with a single request in
-flight it already picks the wrong voice for some of their outputs, and the
-zero_shot / clone_2 references are 0.81 apart in WavLM space. The repo has no
-better 4-voice set (other clips are the same speaker or close in WavLM space),
-so detection leans on CAM++. Requiring agreement only removes flags relative to
-either embedder alone: a weak embedder can make the check miss a leak, and it
-cannot add a failure that the other embedder would not also raise. On main, one request at a time,
-no output had both embedders on the same wrong voice. No margin threshold is
-used, because margins move from run to run (CAM++ alone dipped below zero on a
-2 s window once).
+Margin = own score minus best other score; a negative margin is a wrong argmax.
+Measured margins are in the PR description. WavLM-SV separation is weak for
+indextts2 (a 2.4 s reference): with one request in flight it already picks
+another voice for some of its outputs. Detection leans on CAM++, whose margin
+stayed positive for all three voices at one request at a time. Requiring
+agreement only removes flags relative to either embedder alone: a weak embedder
+can make the check miss a leak, and it cannot add a failure that the other
+embedder would not also raise. No margin threshold is used, because margins move
+from run to run.
 
 Reproduce::
 
@@ -129,7 +121,6 @@ MODEL = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
 # Reference voices: (asset under tests/assets, transcript). Transcripts come from
 # the tests that already use each clip.
 VOICES: dict[str, tuple[str, str]] = {
-    "zero_shot": ("cosyvoice3/zero_shot_prompt.wav", "希望你以后能够做的比我还好呦。"),
     "clone_2": (
         "qwen3_tts/clone_2.wav",
         "Okay. Yeah. I resent you. I love you. I respect you. But you know what? You blew it! And thanks to you.",
@@ -334,7 +325,7 @@ def test_voice_isolation_concurrent(omni_server, online_client, reference_audio_
     Deploy Setting: cosyvoice3.yaml, async_chunk on (default)
     Input Modal: text + ref_audio + ref_text
     Output Modal: audio
-    Input Setting: 32 seeded requests, round-robin over 4 voices, concurrency 8
+    Input Setting: 32 seeded requests, round-robin over 3 voices, concurrency 8
     Datasets: tests/assets reference clips
     """
     run = _get_run("async_chunk", CONCURRENCY, omni_server, online_client, reference_audio_urls, scorers)
@@ -349,7 +340,7 @@ def test_voice_isolation_control_c1(request, omni_server, online_client, referen
     Deploy Setting: cosyvoice3.yaml, async_chunk on and ``--no-async-chunk``
     Input Modal: text + ref_audio + ref_text
     Output Modal: audio
-    Input Setting: 32 seeded requests, round-robin over 4 voices, concurrency 1
+    Input Setting: 32 seeded requests, round-robin over 3 voices, concurrency 1
     Datasets: tests/assets reference clips
     """
     mode = request.node.callspec.id.split("-")[-1]
@@ -357,22 +348,45 @@ def test_voice_isolation_control_c1(request, omni_server, online_client, referen
     _assert_no_leak(f"control_c1_{mode}", run, scorers)
 
 
+def _wait_for_free_vram(min_free_gib: float = 16.0, timeout_s: float = 120.0) -> None:
+    """Give the exited servers a moment to hand their GPU memory back before ASR picks a device."""
+    from vllm_omni.platforms import current_omni_platform
+
+    if not current_omni_platform.is_available():
+        return
+    device = current_omni_platform.get_torch_device(0)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if current_omni_platform.get_free_memory(device) / 1024**3 >= min_free_gib:
+            return
+        time.sleep(2)
+
+
 @hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
-@pytest.mark.parametrize("omni_server", [ASYNC_CHUNK, NO_ASYNC_CHUNK], indirect=True)
-def test_voice_isolation_asr(request, omni_server, online_client, reference_audio_urls, scorers) -> None:
+def test_voice_isolation_asr(monkeypatch) -> None:
     """
-    Speech content of every output of this server mode, as its own failure.
+    Speech content of every generated output, as its own failure after the speaker tests.
     A failure here is a content problem, not a voice leak.
-    Deploy Setting: cosyvoice3.yaml, async_chunk on and ``--no-async-chunk``
-    Input Modal: text + ref_audio + ref_text
-    Output Modal: audio
-    Input Setting: outputs of the speaker tests, generated here if they did not run
-    Datasets: tests/assets reference clips
+    The servers have exited by now (this test uses no server fixture), so Whisper can use the GPU;
+    on CPU its threads are capped so it does not oversubscribe a large host.
+    Input Setting: the outputs kept by the speaker tests of this module
     """
-    mode = request.node.callspec.id.split("-")[-1]
-    concurrencies = [CONCURRENCY, 1] if mode == "async_chunk" else [1]
+    from tests.helpers.media import release_audio_transcriber
+
+    if not _RUNS:
+        pytest.skip("no generated outputs: run together with the speaker tests")
+    release_audio_transcriber()
+    threads = max(1, min(16, (os.cpu_count() or 2) // 2))
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        monkeypatch.setenv(var, str(threads))
+    _wait_for_free_vram()
     failures: list[str] = []
-    for c in concurrencies:
-        run = _get_run(mode, c, omni_server, online_client, reference_audio_urls, scorers)
-        failures += _asr_failures(run)
+    t0 = time.perf_counter()
+    try:
+        for key in sorted(_RUNS):
+            failures += _asr_failures(_RUNS[key])
+    finally:
+        release_audio_transcriber()
+    n = sum(len(r.audio) for r in _RUNS.values())
+    print(f"ASR check: {n} outputs in {time.perf_counter() - t0:.0f}s ({threads} CPU threads if on CPU)")
     assert not failures, "ASR content check failed (not a voice leak):\n" + "\n".join(failures)
