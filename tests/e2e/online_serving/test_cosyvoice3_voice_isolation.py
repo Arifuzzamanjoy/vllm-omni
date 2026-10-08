@@ -49,7 +49,9 @@ clone_2 under both embedders (CAM++ 0.6005 vs 0.6295, WavLM-SV 0.8215 vs 0.8718
 for one output). That gave 1 false failure (both embedders on clone_2) in 128
 scored 2 s windows, and CAM++ alone picked the wrong voice for such a window in
 3 of the 4 runs. The other repo clips are the same speaker as these three or sit
-close to one of them. If reviewers want K=4, a LibriTTS-R voice (CC BY 4.0, e.g.
+close to one of them. The cost: with 8 requests in flight over 3 voices, a leak
+between two requests for the same voice cannot be seen, so a given leak is
+visible with probability about 2/3 instead of 3/4. If reviewers want K=4, a LibriTTS-R voice (CC BY 4.0, e.g.
 speaker 8230) is the candidate; it would have to be vendored.
 
 Reference-vs-reference cosine (clone_2, jiayan_zh, indextts2)::
@@ -305,7 +307,9 @@ def generated(request, run_level, reference_audio_urls) -> str:
     inline batch (8), then one request at a time (inline, then registered). The
     ``--no-async-chunk`` mode only runs the inline control. The server is stopped before
     this fixture returns, so scoring and the ASR check run with the GPU free (Whisper then
-    uses the GPU instead of falling back to CPU next to the server). Returns the mode id.
+    uses the GPU instead of falling back to CPU next to the server). A batch that raises is
+    stored as its error and fails only its own test; the later batches still run. Returns
+    the mode id.
     """
     from tests.helpers.client import OnlineOmniClient
     from tests.helpers.fixtures.runtime import omni_fixture_lock
@@ -326,10 +330,13 @@ def generated(request, run_level, reference_audio_urls) -> str:
             host=server.host, port=server.port, api_key="EMPTY", run_level=run_level, log_stats=server.log_stats
         )
         for source, c in plan:
-            if source == "registered" and not registered:
-                _register_voices(base_url)
-                registered = True
-            _GENERATED[(mode, source, c)] = _generate(client, server.model, c, reference_audio_urls, source)
+            try:
+                if source == "registered" and not registered:
+                    _register_voices(base_url)
+                    registered = True
+                _GENERATED[(mode, source, c)] = _generate(client, server.model, c, reference_audio_urls, source)
+            except Exception as exc:
+                _GENERATED[(mode, source, c)] = {"error": f"{type(exc).__name__}: {exc}"}
     finally:
         if registered:
             _unregister_voices(base_url)
@@ -342,6 +349,8 @@ def _get_run(mode: str, source: str, concurrency: int, scorers) -> RunResult:
     if key in _RUNS:
         return _RUNS[key]
     gen = _GENERATED[key]
+    if "error" in gen:
+        pytest.fail(f"generation failed for mode={mode} voices={source} concurrency={concurrency}: {gen['error']}")
     requests, audio, wall = gen["requests"], gen["audio"], gen["wall_s"]
 
     outputs = [(r["voice"], a) for r, a in zip(requests, audio)]
@@ -513,9 +522,10 @@ def test_voice_isolation_asr(monkeypatch) -> None:
     t0 = time.perf_counter()
     try:
         for (mode, source, c), gen in sorted(_GENERATED.items()):
-            failures += _asr_failures(mode, source, c, gen)
+            if "error" not in gen:  # already failed by its speaker test
+                failures += _asr_failures(mode, source, c, gen)
     finally:
         release_audio_transcriber()
-    n = sum(len(g["audio"]) for g in _GENERATED.values())
+    n = sum(len(g["audio"]) for g in _GENERATED.values() if "error" not in g)
     print(f"ASR check: {n} outputs in {time.perf_counter() - t0:.0f}s ({threads} CPU threads if on CPU)")
     assert not failures, "ASR content check failed (not a voice leak):\n" + "\n".join(failures)
