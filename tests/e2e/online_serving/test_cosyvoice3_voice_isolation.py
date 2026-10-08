@@ -19,10 +19,18 @@ How an output is judged
 * Speech content is checked separately with the repo's ASR assertion, so a
   content failure is never reported as a voice leak.
 
-Requests carry the reference audio and its transcript in the request body
-(``ref_audio`` / ``ref_text``), the same way ``test_cosyvoice3_tts_expansion.py``
-does. This is the per-request conditioning path, which is the one a shared
-batch can mix up. Registered voices (``/v1/audio/voices``) are not used.
+Two ways of naming the voice are exercised, each checked on its own:
+
+* registered: the voices are uploaded with ``POST /v1/audio/voices`` (audio_sample,
+  name, consent, ref_text) and requested by name. This is how clients that reuse a
+  voice call the API, and the model keys its speaker cache by the voice name.
+* inline: the reference audio and its transcript travel in each request body
+  (``ref_audio`` / ``ref_text``), as in ``test_cosyvoice3_tts_expansion.py``. The
+  conditioning is keyed by the audio content.
+
+On one async-chunk server the registered batch runs first (concurrency 8), then
+the inline batch (concurrency 8). The registered path was added because #8235 was
+measured with registered voices.
 
 Controls: the same requests at concurrency 1 in async-chunk mode and in
 ``--no-async-chunk`` mode. They show the scorer is clean when nothing is in
@@ -168,6 +176,7 @@ class RunResult:
     wall_s: float
     full: list[OutputScore]
     first: list[OutputScore]
+    source: str = "inline"
 
 
 def _git_sha() -> str:
@@ -217,34 +226,70 @@ def scorers():
     }
 
 
-# Outputs per (server mode, concurrency), filled by the ``generated`` fixture while
-# its server is up, then scored by the speaker tests and checked by the ASR test.
-_GENERATED: dict[tuple[str, int], dict[str, Any]] = {}
+# Outputs per (server mode, voice source, concurrency), filled by the ``generated``
+# fixture while its server is up, then scored by the speaker tests and checked by
+# the ASR test. ``source`` is "registered" (voice uploaded via /v1/audio/voices and
+# requested by name) or "inline" (ref_audio / ref_text in each request).
+_GENERATED: dict[tuple[str, str, int], dict[str, Any]] = {}
 # Scored runs, so the speaker tests of a mode score each run once.
-_RUNS: dict[tuple[str, int], RunResult] = {}
+_RUNS: dict[tuple[str, str, int], RunResult] = {}
+
+REGISTERED_PREFIX = "voice_isolation_"
+CONSENT_ID = "voice-isolation-test"
 
 
-def _send(client, model: str, req: dict[str, Any], urls: dict[str, str]) -> bytes:
+def _registered_name(voice: str) -> str:
+    return f"{REGISTERED_PREFIX}{voice}"
+
+
+def _register_voices(base_url: str) -> None:
+    """Upload the reference voices the way a client registers a voice (audio_sample, name, consent, ref_text)."""
+    import httpx
+
+    for voice, (rel, ref_text) in VOICES.items():
+        path = get_asset_path(rel)
+        resp = httpx.post(
+            f"{base_url}/v1/audio/voices",
+            files={"audio_sample": (path.name, path.read_bytes(), "audio/wav")},
+            data={"name": _registered_name(voice), "consent": CONSENT_ID, "ref_text": ref_text},
+            timeout=120.0,
+        )
+        assert resp.status_code == 200 and resp.json().get("success"), f"voice upload {voice} failed: {resp.text[:300]}"
+
+
+def _unregister_voices(base_url: str) -> None:
+    """Best effort: do not leave uploaded voices behind on the runner."""
+    import httpx
+
+    for voice in VOICES:
+        try:
+            httpx.delete(f"{base_url}/v1/audio/voices/{_registered_name(voice)}", timeout=30.0)
+        except Exception as exc:
+            print(f"could not delete registered voice {voice}: {exc}")
+
+
+def _send(client, model: str, req: dict[str, Any], urls: dict[str, str], source: str) -> bytes:
+    if source == "registered":
+        voice, extra = _registered_name(req["voice"]), {"seed": req["seed"]}
+    else:
+        voice = None
+        extra = {"ref_audio": urls[req["voice"]], "ref_text": VOICES[req["voice"]][1], "seed": req["seed"]}
     resp = client.client.audio.speech.create(
         model=model,
         input=req["text"],
-        voice=None,
+        voice=voice,
         response_format="wav",
-        extra_body={
-            "ref_audio": urls[req["voice"]],
-            "ref_text": VOICES[req["voice"]][1],
-            "seed": req["seed"],
-        },
+        extra_body=extra,
         timeout=REQUEST_TIMEOUT_S,
     )
     return resp.read()
 
 
-def _generate(client, model: str, concurrency: int, urls: dict[str, str]) -> dict[str, Any]:
+def _generate(client, model: str, concurrency: int, urls: dict[str, str], source: str) -> dict[str, Any]:
     requests = plan_requests()
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(_send, client, model, r, urls) for r in requests]
+        futures = [pool.submit(_send, client, model, r, urls, source) for r in requests]
         audio = [f.result() for f in futures]
     return {"requests": requests, "audio": audio, "wall_s": time.perf_counter() - t0}
 
@@ -256,31 +301,44 @@ def _generate(client, model: str, concurrency: int, urls: dict[str, str]) -> dic
 def generated(request, run_level, reference_audio_urls) -> str:
     """Start one server for this mode, generate every run of the mode, then shut it down.
 
-    The server is stopped before this fixture returns, so scoring and the ASR check
-    run with the GPU free (Whisper then uses the GPU instead of falling back to CPU
-    next to the server). Returns the mode id.
+    In async-chunk mode the registered-voice batch (concurrency 8) comes first, then the
+    inline batch (8), then one request at a time (inline, then registered). The
+    ``--no-async-chunk`` mode only runs the inline control. The server is stopped before
+    this fixture returns, so scoring and the ASR check run with the GPU free (Whisper then
+    uses the GPU instead of falling back to CPU next to the server). Returns the mode id.
     """
     from tests.helpers.client import OnlineOmniClient
     from tests.helpers.fixtures.runtime import omni_fixture_lock
     from tests.helpers.runtime import iter_omni_server
 
     mode = "no_async_chunk" if "--no-async-chunk" in (request.param.server_args or []) else "async_chunk"
-    concurrencies = [CONCURRENCY, 1] if mode == "async_chunk" else [1]
+    plan = (
+        [("registered", CONCURRENCY), ("inline", CONCURRENCY), ("inline", 1), ("registered", 1)]
+        if mode == "async_chunk"
+        else [("inline", 1)]
+    )
     gen = iter_omni_server(request, run_level, omni_fixture_lock)
     server = next(gen)
+    base_url = f"http://{server.host}:{server.port}"
+    registered = False
     try:
         client = OnlineOmniClient(
             host=server.host, port=server.port, api_key="EMPTY", run_level=run_level, log_stats=server.log_stats
         )
-        for c in concurrencies:
-            _GENERATED[(mode, c)] = _generate(client, server.model, c, reference_audio_urls)
+        for source, c in plan:
+            if source == "registered" and not registered:
+                _register_voices(base_url)
+                registered = True
+            _GENERATED[(mode, source, c)] = _generate(client, server.model, c, reference_audio_urls, source)
     finally:
+        if registered:
+            _unregister_voices(base_url)
         gen.close()  # stops the server and releases its GPU memory
     return mode
 
 
-def _get_run(mode: str, concurrency: int, scorers) -> RunResult:
-    key = (mode, concurrency)
+def _get_run(mode: str, source: str, concurrency: int, scorers) -> RunResult:
+    key = (mode, source, concurrency)
     if key in _RUNS:
         return _RUNS[key]
     gen = _GENERATED[key]
@@ -291,7 +349,10 @@ def _get_run(mode: str, concurrency: int, scorers) -> RunResult:
     full = score(outputs, scorers["refs"], scorers["embedders"], window=None, **kwargs)
     first = score(outputs, scorers["refs"], scorers["embedders"], window=FIRST_WINDOW_S, **kwargs)
 
-    print(f"\n=== voice isolation: mode={mode} concurrency={concurrency} n={len(requests)} wall={wall:.1f}s ===")
+    print(
+        f"\n=== voice isolation: mode={mode} voices={source} concurrency={concurrency} "
+        f"n={len(requests)} wall={wall:.1f}s ==="
+    )
     print(format_table(full, first, [len(r["text"]) for r in requests]))
     for label, results in (("full", full), ("first_2s", first)):
         counts: dict[str, int] = {}
@@ -307,7 +368,7 @@ def _get_run(mode: str, concurrency: int, scorers) -> RunResult:
     if short:
         print(f"first_2s: outputs shorter than {FIRST_WINDOW_S}s, scored whole: {short}")
 
-    run = RunResult(mode, concurrency, requests, audio, wall, full, first)
+    run = RunResult(mode, concurrency, requests, audio, wall, full, first, source)
     _RUNS[key] = run
     return run
 
@@ -325,7 +386,7 @@ def _assert_no_leak(test: str, run: RunResult, scorers) -> None:
                 first=run.first,
                 audio=run.audio,
                 reference_matrix=scorers["ref_matrix"],
-                extra={"git_sha": _git_sha(), "mode": run.mode, "concurrency": run.concurrency},
+                extra={"git_sha": _git_sha(), "mode": run.mode, "voices": run.source, "concurrency": run.concurrency},
             )
         )
 
@@ -342,7 +403,7 @@ def _assert_no_leak(test: str, run: RunResult, scorers) -> None:
     )
 
 
-def _asr_failures(mode: str, concurrency: int, gen: dict[str, Any]) -> list[str]:
+def _asr_failures(mode: str, source: str, concurrency: int, gen: dict[str, Any]) -> list[str]:
     failures = []
     for req, audio in zip(gen["requests"], gen["audio"]):
         response = OmniResponse(success=True, audio_bytes=audio, audio_format="audio/wav")
@@ -350,22 +411,37 @@ def _asr_failures(mode: str, concurrency: int, gen: dict[str, Any]) -> list[str]
         try:
             assert_audio_speech_response(response, config, run_level="full_model")
         except AssertionError as exc:
-            failures.append(f"req {req['idx']} ({req['voice']}, mode={mode}, c={concurrency}): {exc}")
+            failures.append(f"req {req['idx']} ({req['voice']}, mode={mode}, voices={source}, c={concurrency}): {exc}")
     return failures
+
+
+@hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
+@pytest.mark.parametrize("generated", [ASYNC_CHUNK], indirect=True)
+def test_voice_isolation_concurrent_registered(generated, scorers) -> None:
+    """
+    Concurrent requests for registered voices must each come back in their own voice.
+    Deploy Setting: cosyvoice3.yaml, async_chunk on (default)
+    Input Modal: text + voice name (voices uploaded via POST /v1/audio/voices)
+    Output Modal: audio
+    Input Setting: 32 seeded requests, round-robin over 3 voices, concurrency 8
+    Datasets: tests/assets reference clips
+    """
+    run = _get_run(generated, "registered", CONCURRENCY, scorers)
+    _assert_no_leak("concurrent_registered", run, scorers)
 
 
 @hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
 @pytest.mark.parametrize("generated", [ASYNC_CHUNK], indirect=True)
 def test_voice_isolation_concurrent(generated, scorers) -> None:
     """
-    Concurrent requests must each come back in their own reference voice.
+    Concurrent requests with an inline reference must each come back in their own reference voice.
     Deploy Setting: cosyvoice3.yaml, async_chunk on (default)
     Input Modal: text + ref_audio + ref_text
     Output Modal: audio
     Input Setting: 32 seeded requests, round-robin over 3 voices, concurrency 8
     Datasets: tests/assets reference clips
     """
-    run = _get_run(generated, CONCURRENCY, scorers)
+    run = _get_run(generated, "inline", CONCURRENCY, scorers)
     _assert_no_leak("concurrent", run, scorers)
 
 
@@ -380,8 +456,23 @@ def test_voice_isolation_control_c1(generated, scorers) -> None:
     Input Setting: 32 seeded requests, round-robin over 3 voices, concurrency 1
     Datasets: tests/assets reference clips
     """
-    run = _get_run(generated, 1, scorers)
+    run = _get_run(generated, "inline", 1, scorers)
     _assert_no_leak(f"control_c1_{generated}", run, scorers)
+
+
+@hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
+@pytest.mark.parametrize("generated", [ASYNC_CHUNK], indirect=True)
+def test_voice_isolation_control_c1_registered(generated, scorers) -> None:
+    """
+    Control for registered voices: the same requests one at a time (async-chunk only).
+    Deploy Setting: cosyvoice3.yaml, async_chunk on (default)
+    Input Modal: text + voice name
+    Output Modal: audio
+    Input Setting: 32 seeded requests, round-robin over 3 voices, concurrency 1
+    Datasets: tests/assets reference clips
+    """
+    run = _get_run(generated, "registered", 1, scorers)
+    _assert_no_leak(f"control_c1_registered_{generated}", run, scorers)
 
 
 def _wait_for_free_vram(min_free_gib: float = 16.0, timeout_s: float = 120.0) -> None:
@@ -419,8 +510,8 @@ def test_voice_isolation_asr(monkeypatch) -> None:
     failures: list[str] = []
     t0 = time.perf_counter()
     try:
-        for (mode, c), gen in sorted(_GENERATED.items()):
-            failures += _asr_failures(mode, c, gen)
+        for (mode, source, c), gen in sorted(_GENERATED.items()):
+            failures += _asr_failures(mode, source, c, gen)
     finally:
         release_audio_transcriber()
     n = sum(len(g["audio"]) for g in _GENERATED.values())
