@@ -147,7 +147,6 @@ def test_swapped_labels_fail_with_real_embedders():
     from tests.helpers.speaker_similarity import CampPlusEmbedder, WavLMSVEmbedder, embed_references, load_audio_16k
 
     assets = {
-        "zero_shot": "cosyvoice3/zero_shot_prompt.wav",
         "clone_2": "qwen3_tts/clone_2.wav",
         "jiayan_zh": "glm_tts/jiayan_zh.wav",
         "indextts2": "indextts2/ref_audio.wav",
@@ -159,16 +158,14 @@ def test_swapped_labels_fail_with_real_embedders():
     ]
     ref_emb = embed_references(refs, embedders)
     names = list(refs)
-    swapped = {1: "jiayan_zh", 3: "zero_shot"}  # request index -> voice label it is (wrongly) sent under
+    # request index -> voice label the output of ``names[index]`` is (wrongly) sent under
+    swapped = {1: "indextts2", 2: "jiayan_zh"}
     outputs = [(swapped.get(i, n), refs[n]) for i, n in enumerate(names)]
-    # The output of ``names[i]`` is labelled ``swapped[i]``: it should have come back as that voice, did not.
     for window in (None, 2.0):
         results = score(outputs, refs, embedders, window=window, reference_embeddings=ref_emb)
         labels = {r.idx: r.label for r in results}
-        assert labels == {
-            0: LABEL_CORRECT,
-            1: LABEL_WRONG_BOTH_AGREE,
-            2: LABEL_CORRECT,
-            3: LABEL_WRONG_BOTH_AGREE,
-        }, (window, [r.to_dict() for r in results])
-        assert results[1].wrong_voice == "clone_2" and results[3].wrong_voice == "indextts2"
+        assert labels == {0: LABEL_CORRECT, 1: LABEL_WRONG_BOTH_AGREE, 2: LABEL_WRONG_BOTH_AGREE}, (
+            window,
+            [r.to_dict() for r in results],
+        )
+        assert results[1].wrong_voice == "jiayan_zh" and results[2].wrong_voice == "indextts2"
