@@ -4,72 +4,31 @@
 Cross-request voice isolation check for CosyVoice3 voice cloning (#8555).
 
 Under concurrency a voice-cloning request can come back in the voice of another
-request that is in flight at the same time (#8235, fixed by #8224). This test
-sends N seeded requests round-robin over K reference voices and asserts that
-every output is closest to its own reference.
+request in flight at the same time (#8235, fixed by #8224). This test sends 32
+seeded requests round-robin over 3 reference voices and asserts that every output
+is closest to its own reference.
 
-How an output is judged
-* Two independent speaker embedders score it against all K references:
-  CosyVoice3's own CAM++ (``campplus.onnx`` from the model snapshot) and
+* Two independent speaker embedders score each output against all references:
+  CosyVoice3's CAM++ (``campplus.onnx`` from the model snapshot) and
   ``microsoft/wavlm-base-plus-sv``.
-* A mismatch counts only when both embedders pick the same wrong voice. One
-  embedder alone has flagged a mostly non-speech output before.
-* The check runs on the full output and again on its first 2 s only.
-* Zero mismatches are allowed. Outputs the embedders disagree on are logged.
-* Speech content is checked separately with the repo's ASR assertion, so a
-  content failure is never reported as a voice leak.
+* A leak is an output where both embedders agree on the same wrong voice. It is
+  checked on the full output and on its first 2 s. Zero leaks are allowed.
+* Speech content is checked separately by the ASR test, so a content failure is
+  never reported as a voice leak.
 
-Two ways of naming the voice are exercised, each checked on its own:
+Two ways of naming the voice are tested, each on its own: registered (uploaded with
+``POST /v1/audio/voices`` and requested by name) and inline (``ref_audio`` /
+``ref_text`` in the request body). Both run at concurrency 8 on one async-chunk server.
 
-* registered: the voices are uploaded with ``POST /v1/audio/voices`` (audio_sample,
-  name, consent, ref_text) and requested by name. This is how clients that reuse a
-  voice call the API, and the model keys its speaker cache by the voice name.
-* inline: the reference audio and its transcript travel in each request body
-  (``ref_audio`` / ``ref_text``), as in ``test_cosyvoice3_tts_expansion.py``. The
-  conditioning is keyed by the audio content.
+Controls run the same requests at concurrency 1, in async-chunk mode and with
+``--no-async-chunk``, to show the scorer is clean when nothing is in flight. The swap
+test feeds the reference clips back as outputs with two labels swapped, to show the
+check can fail. It starts no server.
 
-On one async-chunk server the registered batch runs first (concurrency 8), then
-the inline batch (concurrency 8). The registered path was added because #8235 was
-measured with registered voices.
-
-Controls: the same requests at concurrency 1 in async-chunk mode and in
-``--no-async-chunk`` mode. They show the scorer is clean when nothing is in
-flight.
-
-Voices (K=3, a deliberate change from the K=4 in #8555)
-
-* clone_2    qwen3_tts/clone_2.wav, 8.1 s, en
-* jiayan_zh  glm_tts/jiayan_zh.wav, 5.5 s, zh
-* indextts2  indextts2/ref_audio.wav, 2.4 s, zh (transcript from Whisper small; large-v3 differs
-  on the first word, "翻译翻译" vs "翻一翻一")
-
-The fourth repo clip, cosyvoice3/zero_shot_prompt.wav, was dropped. On main, one
-request at a time, the first 2 s of its outputs sit almost on the boundary to
-clone_2 under both embedders (CAM++ 0.6005 vs 0.6295, WavLM-SV 0.8215 vs 0.8718
-for one output). That gave 1 false failure (both embedders on clone_2) in 128
-scored 2 s windows, and CAM++ alone picked the wrong voice for such a window in
-3 of the 4 runs. The other repo clips are the same speaker as these three or sit
-close to one of them. The cost: with 8 requests in flight over 3 voices, a leak
-between two requests for the same voice cannot be seen, so a given leak is
-visible with probability about 2/3 instead of 3/4. If reviewers want K=4, a LibriTTS-R voice (CC BY 4.0, e.g.
-speaker 8230) is the candidate; it would have to be vendored.
-
-Reference-vs-reference cosine (clone_2, jiayan_zh, indextts2)::
-
-    CAM++                    WavLM-SV
-     1.000  0.049 -0.013      1.000  0.180  0.381
-     0.049  1.000 -0.130      0.180  1.000  0.417
-    -0.013 -0.130  1.000      0.381  0.417  1.000
-
-Margin = own score minus best other score; a negative margin is a wrong argmax.
-Measured margins are in the PR description. WavLM-SV separation is weak for
-indextts2 (a 2.4 s reference): with one request in flight it already picks
-another voice for some of its outputs. Detection leans on CAM++, whose margin
-stayed positive for all three voices at one request at a time. Requiring
-agreement only removes flags relative to either embedder alone: a weak embedder
-can make the check miss a leak, and it cannot add a failure that the other
-embedder would not also raise. No margin threshold is used, because margins move
-from run to run.
+Voices (K=3, a deliberate change from the K=4 in #8555): clone_2 (qwen3_tts),
+jiayan_zh (glm_tts) and indextts2. cosyvoice3/zero_shot_prompt.wav was dropped: on main,
+with one request at a time, its outputs sit on the boundary to clone_2 and gave a false
+failure.
 
 Reproduce::
 
@@ -98,6 +57,7 @@ from tests.helpers.mark import hardware_test
 from tests.helpers.media import get_asset_path
 from tests.helpers.runtime import OmniServerParams
 from tests.helpers.speaker_similarity import (
+    LABEL_CORRECT,
     LABEL_DISAGREE,
     LABEL_WRONG_BOTH_AGREE,
     WAVLM_SV_MODEL,
@@ -116,10 +76,6 @@ from tests.helpers.speaker_similarity import (
     wrong_both_agree,
 )
 from tests.helpers.stage_config import get_deploy_config_path
-from vllm_omni.platforms import current_omni_platform
-
-if current_omni_platform.is_rocm():
-    os.environ.setdefault("COSYVOICE3_TRT", "0")
 
 pytestmark = [
     pytest.mark.full_model,
@@ -484,6 +440,30 @@ def test_voice_isolation_control_c1_registered(generated, scorers) -> None:
     """
     run = _get_run(generated, "registered", 1, scorers)
     _assert_no_leak(f"control_c1_registered_{generated}", run, scorers)
+
+
+@hardware_test(res={"cuda": ["L4", "B200"]}, num_cards=1)
+def test_swapped_labels_fail_with_real_embedders(scorers) -> None:
+    """
+    The scorer must flag a swap: reference clips as outputs, two labels swapped.
+    Both swaps must be wrong_both_agree and the rest correct, on the full clip and on its first 2 s.
+    No server is started.
+    Input Setting: the 3 reference clips, labels of two of them swapped
+    Datasets: tests/assets reference clips
+    """
+    refs, embedders = scorers["refs"], scorers["embedders"]
+    names = list(refs)
+    # request index -> voice label the output of ``names[index]`` is (wrongly) sent under
+    swapped = {1: "indextts2", 2: "jiayan_zh"}
+    outputs = [(swapped.get(i, n), refs[n]) for i, n in enumerate(names)]
+    for window in (None, FIRST_WINDOW_S):
+        results = score(outputs, refs, embedders, window=window, reference_embeddings=scorers["ref_emb"])
+        labels = {r.idx: r.label for r in results}
+        assert labels == {0: LABEL_CORRECT, 1: LABEL_WRONG_BOTH_AGREE, 2: LABEL_WRONG_BOTH_AGREE}, (
+            window,
+            [r.to_dict() for r in results],
+        )
+        assert results[1].wrong_voice == "jiayan_zh" and results[2].wrong_voice == "indextts2"
 
 
 def _wait_for_free_vram(min_free_gib: float = 16.0, timeout_s: float = 120.0) -> None:

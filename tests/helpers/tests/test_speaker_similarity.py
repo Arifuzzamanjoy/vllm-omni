@@ -1,28 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Tests for tests.helpers.speaker_similarity.
-
-The fake-embedder tests need no model. The real-embedder test downloads
-``campplus.onnx`` and ``microsoft/wavlm-base-plus-sv``, so it is not part of the
-L1 CPU lane. It feeds the reference clips back in as "outputs" with two labels
-swapped, which proves the check can fail: the swapped outputs must come back as
-``wrong_both_agree`` and the others as ``correct``, on the full clip and on the
-first 2 s.
-"""
+"""Tests for tests.helpers.speaker_similarity. They use fake embedders and need no model."""
 
 import json
 
 import numpy as np
 import pytest
 
-from tests.helpers.media import get_asset_path
 from tests.helpers.speaker_similarity import (
     LABEL_CORRECT,
     LABEL_DISAGREE,
     LABEL_WRONG_BOTH_AGREE,
     SAMPLE_RATE,
     FailureReport,
-    SpeakerEmbedder,
     classify,
     crop_window,
     min_margins,
@@ -147,35 +137,3 @@ def test_retain_failed_voice_isolation_writes_wav_and_json(tmp_path, monkeypatch
     assert data["full"][1]["label"] == LABEL_WRONG_BOTH_AGREE and data["git_sha"] == "abc"
     monkeypatch.delenv("VLLM_OMNI_FAILED_SPEECH_AUDIO_DIR", raising=False)
     assert retain_failed_voice_isolation(report, None) == []
-
-
-@pytest.mark.advanced_model
-def test_swapped_labels_fail_with_real_embedders():
-    """Reference clips as outputs, two labels swapped: both swaps must be flagged, the rest correct."""
-    from huggingface_hub import snapshot_download
-
-    from tests.helpers.speaker_similarity import CampPlusEmbedder, WavLMSVEmbedder, embed_references, load_audio_16k
-
-    assets = {
-        "clone_2": "qwen3_tts/clone_2.wav",
-        "jiayan_zh": "glm_tts/jiayan_zh.wav",
-        "indextts2": "indextts2/ref_audio.wav",
-    }
-    refs = {name: load_audio_16k(get_asset_path(rel)) for name, rel in assets.items()}
-    embedders: list[SpeakerEmbedder] = [
-        CampPlusEmbedder(snapshot_download("FunAudioLLM/Fun-CosyVoice3-0.5B-2512", allow_patterns=["campplus.onnx"])),
-        WavLMSVEmbedder(),
-    ]
-    ref_emb = embed_references(refs, embedders)
-    names = list(refs)
-    # request index -> voice label the output of ``names[index]`` is (wrongly) sent under
-    swapped = {1: "indextts2", 2: "jiayan_zh"}
-    outputs = [(swapped.get(i, n), refs[n]) for i, n in enumerate(names)]
-    for window in (None, 2.0):
-        results = score(outputs, refs, embedders, window=window, reference_embeddings=ref_emb)
-        labels = {r.idx: r.label for r in results}
-        assert labels == {0: LABEL_CORRECT, 1: LABEL_WRONG_BOTH_AGREE, 2: LABEL_WRONG_BOTH_AGREE}, (
-            window,
-            [r.to_dict() for r in results],
-        )
-        assert results[1].wrong_voice == "jiayan_zh" and results[2].wrong_voice == "indextts2"
